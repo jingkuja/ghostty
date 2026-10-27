@@ -131,6 +131,11 @@ extension Ghostty {
                     )
                 }
 
+                // Compose box
+                if surfaceView.composeBoxVisible {
+                    ComposeBoxOverlay(surfaceView: surfaceView)
+                }
+
                 // Show bell border if enabled
                 if ghostty.config.bellFeatures.contains(.border) {
                     BellBorderOverlay(bell: surfaceView.bell)

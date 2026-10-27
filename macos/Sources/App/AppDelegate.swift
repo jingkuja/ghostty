@@ -239,6 +239,7 @@ class AppDelegate: NSObject,
         NSApp.servicesMenu = menuServices
 
         installAgentAttentionMenuItem()
+        installComposeBoxMenuItem()
 
         // Setup a local event monitor for app-level keyboard shortcuts. See
         // localEventHandler for more info why.

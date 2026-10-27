@@ -109,6 +109,12 @@ extension Ghostty {
         /// True when the bell is active. This is set inactive on focus or event.
         @Published private(set) var bell: Bool = false
 
+        /// True when the compose box is shown over this surface.
+        @Published var composeBoxVisible: Bool = false
+
+        /// The compose box text, kept while the box is closed.
+        var composeDraft: String = ""
+
         /// A clipboard confirmation waiting to be handled by its controller.
         @Published var pendingClipboardConfirmation: ClipboardConfirmationRequest? {
             didSet {
