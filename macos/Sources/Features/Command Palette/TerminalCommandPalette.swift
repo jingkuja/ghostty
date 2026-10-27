@@ -76,6 +76,9 @@ struct TerminalCommandPaletteView: View {
         // Updates always appear first
         options.append(contentsOf: updateOptions)
 
+        // Then jumping to agents that are waiting for the user
+        options.append(contentsOf: agentAttentionOptions)
+
         // Sort the rest. We replace ":" with a character that sorts before space
         // so that "Foo:" sorts before "Foo Bar:". Use sortKey as a tie-breaker
         // for stable ordering when titles are equal.
@@ -141,6 +144,21 @@ struct TerminalCommandPaletteView: View {
             }
     }
 
+    /// Command for jumping to the next agent waiting for the user, if any.
+    private var agentAttentionOptions: [CommandOption] {
+        let waiting = AgentAttention.waitingSurfaces()
+        guard !waiting.isEmpty else { return [] }
+
+        return [CommandOption(
+            title: "Jump to Next Waiting Agent",
+            leadingIcon: "bell.badge.fill",
+            badge: "\(waiting.count)",
+            emphasis: true
+        ) {
+            AgentAttention.focusNextWaiting(after: surfaceView)
+        }]
+    }
+
     /// Commands for jumping to other terminal surfaces.
     private var jumpOptions: [CommandOption] {
         TerminalController.all.flatMap { controller -> [CommandOption] in
@@ -166,11 +184,13 @@ struct TerminalCommandPaletteView: View {
                     nil
                 }
 
+                let agentState = surface.agentState
                 return CommandOption(
                     title: "Focus: \(displayTitle)",
                     subtitle: subtitle,
-                    leadingIcon: "rectangle.on.rectangle",
+                    leadingIcon: agentState.symbolName ?? "rectangle.on.rectangle",
                     leadingColor: displayColor?.displayColor.map { Color($0) },
+                    badge: agentState.label,
                     sortKey: ObjectIdentifier(surface)
                 ) {
                     NotificationCenter.default.post(

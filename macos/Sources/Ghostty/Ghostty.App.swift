@@ -1610,6 +1610,9 @@ extension Ghostty {
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
                 guard let title = String(cString: n.title!, encoding: .utf8) else { return }
                 guard let body = String(cString: n.body!, encoding: .utf8) else { return }
+                DispatchQueue.main.async {
+                    surfaceView.markNeedsAttention()
+                }
                 showDesktopNotification(surfaceView, title: title, body: body)
 
             default:

@@ -823,6 +823,14 @@ extension Ghostty {
             bell = true
         }
 
+        /// Marks an unfocused surface as needing attention, like the bell but
+        /// without its sound or other side effects. Used for desktop
+        /// notifications, which agents often send instead of the bell.
+        func markNeedsAttention() {
+            guard !focused else { return }
+            bell = true
+        }
+
         @objc private func windowDidChangeScreen(notification: SwiftUI.Notification) {
             guard let window = self.window else { return }
             guard let object = notification.object as? NSWindow, window == object else { return }

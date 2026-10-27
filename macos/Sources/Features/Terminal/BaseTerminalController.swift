@@ -62,6 +62,9 @@ class BaseTerminalController: NSWindowController,
     /// True when any surface in this controller currently has an active bell.
     @Published private(set) var bell: Bool = false
 
+    /// The highest priority agent state across all surfaces in this controller.
+    @Published private(set) var agentState: AgentState = .idle
+
     /// Whether the terminal surface should focus when the mouse is over it.
     var focusFollowsMouse: Bool {
         self.derivedConfig.focusFollowsMouse
@@ -96,6 +99,12 @@ class BaseTerminalController: NSWindowController,
 
     /// Cancellable for aggregating bell state across all surfaces in this controller.
     private var bellStateCancellable: AnyCancellable?
+
+    /// Cancellable for aggregating agent state across all surfaces in this controller.
+    private var agentStateCancellable: AnyCancellable?
+
+    /// The agent state the current title was computed with.
+    private var titleAgentState: AgentState = .idle
 
     /// Cancellable for clipboard confirmation requests from surfaces in this controller.
     private var clipboardConfirmationCancellable: AnyCancellable?
@@ -155,6 +164,7 @@ class BaseTerminalController: NSWindowController,
 
         // Setup our bell state for the window
         setupBellNotificationPublisher()
+        setupAgentStatePublisher()
         setupClipboardConfirmationPublisher()
 
         // Setup our notifications for behaviors
@@ -887,11 +897,16 @@ class BaseTerminalController: NSWindowController,
         // closed surfaces.
         if let titleSurface = focusedSurface ?? lastFocusedSurface,
            surfaceTree.contains(titleSurface) {
-            // If we have a surface, we want to listen for title changes.
+            // If we have a surface, we want to listen for title changes. The
+            // agent state covers every surface in this window so that a
+            // background split still marks the tab.
             titleSurface.$title
-                .combineLatest(titleSurface.$bell)
-                .map { [weak self] in self?.computeTitle(title: $0, bell: $1) ?? "" }
-                .sink { [weak self] in self?.titleDidChange(to: $0) }
+                .combineLatest($agentState)
+                .sink { [weak self] title, state in
+                    guard let self else { return }
+                    titleAgentState = state
+                    titleDidChange(to: computeTitle(title: title, state: state))
+                }
                 .store(in: &focusedSurfaceCancellables)
         } else {
             // There is no surface to listen to titles for.
@@ -899,13 +914,13 @@ class BaseTerminalController: NSWindowController,
         }
     }
 
-    private func computeTitle(title: String, bell: Bool) -> String {
-        var result = title
-        if bell && ghostty.config.bellFeatures.contains(.title) {
-            result = "🔔 \(result)"
+    private func computeTitle(title: String, state: AgentState) -> String {
+        guard let prefix = state.titlePrefix else { return title }
+        if state == .waiting && !ghostty.config.bellFeatures.contains(.title) {
+            return title
         }
 
-        return result
+        return "\(prefix) \(title)"
     }
 
     private func titleDidChange(to: String) {
@@ -919,7 +934,7 @@ class BaseTerminalController: NSWindowController,
         if let titleOverride {
             window.title = computeTitle(
                 title: titleOverride,
-                bell: focusedSurface?.bell ?? false)
+                state: titleAgentState)
             return
         }
 
@@ -1705,6 +1720,22 @@ extension BaseTerminalController {
                     userInfo: [Notification.Name.terminalWindowHasBellKey: hasBell]
                 )
             }
+    }
+
+    /// Aggregates the agent state of all surfaces in this controller.
+    private func setupAgentStatePublisher() {
+        agentStateCancellable = surfaceValuesPublisher(valueKeyPath: \.bell, publisherKeyPath: \.$bell)
+            .combineLatest(surfaceValuesPublisher(
+                valueKeyPath: \.progressReport,
+                publisherKeyPath: \.$progressReport))
+            .map { bells, reports in
+                bells.keys
+                    .map { AgentState(bell: bells[$0] ?? false, progressReport: reports[$0] ?? nil) }
+                    .max() ?? .idle
+            }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.agentState = $0 }
     }
 
     /// Creates a publisher for values on all surfaces in this controller's tree.
