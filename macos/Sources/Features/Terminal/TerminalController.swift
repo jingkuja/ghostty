@@ -61,6 +61,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// The notification cancellable for focused surface property changes.
     private var surfaceAppearanceCancellables: Set<AnyCancellable> = []
 
+    /// The Claude Code sessions panel on the left of this window.
+    private(set) lazy var claudeSessions = ClaudeSessionsModel(controller: self)
+
     init(_ ghostty: Ghostty.App,
          withBaseConfig base: Ghostty.SurfaceConfiguration? = nil,
          withSurfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil,
@@ -1114,7 +1117,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // Initialize our content view to the SwiftUI root
         let container = TerminalViewContainer {
-            TerminalView(ghostty: ghostty, viewModel: self, delegate: self)
+            TerminalView(ghostty: ghostty, viewModel: self, delegate: self, claudeSessions: claudeSessions)
         }
 
         // Set the initial content size on the container so that
@@ -1503,6 +1506,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         ghostty.toggleFullscreen(surface: surface)
     }
 
+    @IBAction func toggleClaudeSessions(_ sender: Any?) {
+        claudeSessions.toggle()
+    }
+
     @IBAction func toggleTerminalInspector(_ sender: Any?) {
         guard let surface = focusedSurface?.surface else { return }
         ghostty.toggleTerminalInspector(surface: surface)
@@ -1512,6 +1519,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     override func focusedSurfaceDidChange(to: Ghostty.SurfaceView?) {
         super.focusedSurfaceDidChange(to: to)
+
+        // The panel highlights the session running in the focused surface.
+        claudeSessions.refresh()
 
         // We always cancel our event listener
         surfaceAppearanceCancellables.removeAll()
@@ -1530,6 +1540,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             .dropFirst()
             .sink { [weak self, weak focusedSurface] _ in self?.syncAppearanceOnPropertyChange(focusedSurface) }
             .store(in: &surfaceAppearanceCancellables)
+    }
+
+    override func pwdDidChange(to: URL?) {
+        super.pwdDidChange(to: to)
+
+        // Focus moving out of the terminals (e.g. into the panel's filter field)
+        // reports no directory; keep showing the last one.
+        if let to { claudeSessions.directoryDidChange(to.path) }
     }
 
     private func syncAppearanceOnPropertyChange(_ surface: Ghostty.SurfaceView?) {

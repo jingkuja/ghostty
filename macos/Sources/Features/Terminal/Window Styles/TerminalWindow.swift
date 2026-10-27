@@ -189,7 +189,42 @@ class TerminalWindow: NSWindow {
             return
         }
 
+        if handleDocumentIconClick(event) {
+            return
+        }
+
         super.sendEvent(event)
+    }
+
+    /// A plain click on the titlebar's folder (proxy) icon toggles the Claude Code sessions
+    /// panel. Dragging the icon and Command-clicking it for the path menu work as usual.
+    private func handleDocumentIconClick(_ event: NSEvent) -> Bool {
+        guard event.type == .leftMouseDown,
+              event.clickCount == 1,
+              event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+              let controller = terminalController,
+              let button = standardWindowButton(.documentIconButton),
+              !button.isHiddenOrHasHiddenAncestor,
+              button.bounds.contains(button.convert(event.locationInWindow, from: nil))
+        else { return false }
+
+        // Track the mouse until it is released or starts dragging the icon.
+        while let next = nextEvent(matching: [.leftMouseUp, .leftMouseDragged]) {
+            if next.type == .leftMouseUp {
+                controller.toggleClaudeSessions(self)
+                return true
+            }
+
+            let dx = next.locationInWindow.x - event.locationInWindow.x
+            let dy = next.locationInWindow.y - event.locationInWindow.y
+            if dx * dx + dy * dy >= 9 {
+                // Hand the drag to the icon: it gets the mouse down, then this drag.
+                postEvent(next, atStart: true)
+                return false
+            }
+        }
+
+        return false
     }
 
     override func close() {
