@@ -2734,6 +2734,15 @@ pub fn preeditCallback(self: *Surface, preedit_: ?[]const u8) !void {
     self.renderer_state.preedit = .{
         .codepoints = try codepoints.toOwnedSlice(self.alloc),
     };
+
+    // Composing keys encode nothing, so keyCallback never reaches its
+    // scroll-to-bottom logic for them. If the viewport is scrolled back,
+    // the preedit (drawn at the cursor) would be off screen and the IME
+    // candidate window would be placed against the wrong rows.
+    if (self.config.scroll_to_bottom.keystroke) {
+        self.io.terminal.scrollViewport(.bottom);
+    }
+
     try self.queueRender();
 }
 
