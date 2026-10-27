@@ -19,6 +19,12 @@ const log = std.log.scoped(.renderer_thread);
 
 const CURSOR_BLINK_INTERVAL = 600;
 
+/// Minimum interval between frame updates while the surface is visible but
+/// not focused (~30fps). Programs that redraw continuously, such as several
+/// coding agents side by side in splits, otherwise cost a full frame rebuild
+/// per redraw in every split. Focused surfaces are never throttled.
+const UNFOCUSED_FRAME_INTERVAL = 33;
+
 /// Whether calls to `drawFrame` must be done from the app thread.
 ///
 /// The type used for sending messages to the IO thread. For now this is
@@ -62,6 +68,13 @@ draw_now_c: xev.Completion = .{},
 cursor_h: xev.Timer,
 cursor_c: xev.Completion = .{},
 cursor_c_cancel: xev.Completion = .{},
+
+/// Rate limits frame updates while unfocused. See UNFOCUSED_FRAME_INTERVAL.
+/// The first wakeup renders immediately and starts the timer; wakeups while
+/// it is active only set `throttle_pending`, which the timer then flushes.
+throttle_h: xev.Timer,
+throttle_c: xev.Completion = .{},
+throttle_pending: bool = false,
 
 /// Incremental scrollback compression scheduling.
 compression: Compression = undefined,
@@ -144,6 +157,10 @@ pub fn init(
     var cursor_timer = try xev.Timer.init();
     errdefer cursor_timer.deinit();
 
+    // Setup a timer for rate limiting unfocused frame updates
+    var throttle_timer = try xev.Timer.init();
+    errdefer throttle_timer.deinit();
+
     // The mailbox for messaging this thread
     var mailbox = try Mailbox.create(alloc);
     errdefer mailbox.destroy(alloc);
@@ -157,6 +174,7 @@ pub fn init(
         .render_h = render_h,
         .draw_now = draw_now,
         .cursor_h = cursor_timer,
+        .throttle_h = throttle_timer,
         .surface = surface,
         .renderer = renderer_impl,
         .state = state,
@@ -180,6 +198,7 @@ pub fn deinit(self: *Thread) void {
     self.render_h.deinit();
     self.draw_now.deinit();
     self.cursor_h.deinit();
+    self.throttle_h.deinit();
     if (comptime terminalpkg.compression_enabled)
         self.compression.deinit();
     self.loop.deinit();
@@ -286,8 +305,12 @@ fn setQosClass(self: *const Thread) void {
     }
 }
 
-/// Drain the mailbox.
-fn drainMailbox(self: *Thread) !void {
+/// Drain the mailbox. Returns true if any message was drained that should
+/// render without throttling (everything but the periodic cursor blink
+/// reset that accompanies terminal output).
+fn drainMailbox(self: *Thread) !bool {
+    var urgent = false;
+
     // There's probably a more elegant way to do this...
     //
     // This is effectively an @autoreleasepool{} block, which we need in
@@ -300,6 +323,7 @@ fn drainMailbox(self: *Thread) !void {
 
     while (self.mailbox.pop(global.io())) |message| {
         log.debug("mailbox message={}", .{message});
+        if (message != .reset_cursor_blink) urgent = true;
         switch (message) {
             .crash => @panic("crash request, crashing intentionally"),
 
@@ -441,6 +465,8 @@ fn drainMailbox(self: *Thread) !void {
             },
         }
     }
+
+    return urgent;
 }
 
 fn changeConfig(self: *Thread, config: *const DerivedConfig) !void {
@@ -486,11 +512,18 @@ fn wakeupCallback(
 
     // When we wake up, we check the mailbox. Mailbox producers should
     // wake up our thread after publishing.
-    t.drainMailbox() catch |err|
+    const urgent = t.drainMailbox() catch |err| urgent: {
         log.err("error draining mailbox err={}", .{err});
+        break :urgent true;
+    };
 
-    // Render immediately
-    _ = renderCallback(t, undefined, undefined, {});
+    // Render immediately, unless we're unfocused and this wakeup is only
+    // for new terminal content, in which case we rate limit.
+    if (t.flags.focused or urgent) {
+        _ = renderCallback(t, undefined, undefined, {});
+    } else {
+        t.throttledRender();
+    }
 
     // PageList mutations maintain their own compression dirty state. Checking
     // it here covers output, resize, and viewport scrolling uniformly.
@@ -582,6 +615,58 @@ fn renderCallback(
     // Schedule the next animation wake, if the renderer needs one.
     t.armAnimationTimer();
 
+    return .disarm;
+}
+
+/// Render now if no throttle window is active, otherwise defer to the end
+/// of the current window. See UNFOCUSED_FRAME_INTERVAL.
+fn throttledRender(self: *Thread) void {
+    if (self.throttle_c.state() == .active) {
+        self.throttle_pending = true;
+        return;
+    }
+
+    self.renderAndStartThrottle();
+}
+
+/// Render and start a new throttle window. Like the cursor timer, this is
+/// safe to call from the throttle timer's own callback.
+fn renderAndStartThrottle(self: *Thread) void {
+    self.throttle_pending = false;
+    _ = renderCallback(self, undefined, undefined, {});
+    self.throttle_h.run(
+        &self.loop,
+        &self.throttle_c,
+        UNFOCUSED_FRAME_INTERVAL,
+        Thread,
+        self,
+        throttleCallback,
+    );
+}
+
+fn throttleCallback(
+    self_: ?*Thread,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Timer.RunError!void,
+) xev.CallbackAction {
+    _ = r catch |err| {
+        log.warn("error in throttle timer callback err={}", .{err});
+        return .disarm;
+    };
+
+    const t: *Thread = self_ orelse {
+        // This shouldn't happen so we log it.
+        log.warn("throttle callback fired without data set", .{});
+        return .disarm;
+    };
+
+    // Nothing arrived during the window, so the next wakeup can render
+    // right away.
+    if (!t.throttle_pending) return .disarm;
+
+    // Flush the deferred update and start a new window.
+    t.renderAndStartThrottle();
     return .disarm;
 }
 
