@@ -58,6 +58,19 @@ extension Ghostty {
             }
         }
 
+        /// Press and release Enter, e.g. to submit text sent with `sendText`.
+        @MainActor
+        func sendEnter() {
+            for action: Ghostty.Input.Action in [.press, .release] {
+                sendKeyEvent(Ghostty.Input.KeyEvent(
+                    synthesizing: .enter,
+                    action: action,
+                    mods: [],
+                    translationMods: []
+                ))
+            }
+        }
+
         /// Paste text into the terminal as if it came from the clipboard. Unlike `sendText`, this
         /// honors paste protection, so unsafe text (e.g. containing newlines) prompts for
         /// confirmation first. Use this for text from external sources such as drag and drop.

@@ -1,6 +1,12 @@
 import AppKit
 import Combine
 
+/// The tabs of the panel on the left of a terminal window.
+enum ClaudePanelTab {
+    case sessions
+    case commands
+}
+
 /// State behind the Claude Code sessions panel on the left of a terminal window.
 ///
 /// The panel lists the sessions recorded for the focused surface's working directory.
@@ -16,6 +22,7 @@ final class ClaudeSessionsModel: ObservableObject {
     private static let queue = DispatchQueue(label: "com.mitchellh.ghostty.claude-sessions", qos: .utility)
 
     @Published private(set) var isOpen = false
+    @Published var tab: ClaudePanelTab = .sessions
     @Published private(set) var directory: String?
     @Published private(set) var sessions: [ClaudeSession] = []
     @Published private(set) var loading = false
@@ -149,5 +156,23 @@ final class ClaudeSessionsModel: ObservableObject {
         config.initialInput = "claude --resume \(session.id)\(fork ? " --fork-session" : "")\n"
         _ = TerminalController.newTab(controller.ghostty, from: controller.window, withBaseConfig: config)
         refresh()
+    }
+
+    /// Types the command into this window's focused surface and focuses it, so the
+    /// command can be completed or edited before it runs. With `execute`, Enter follows.
+    func insert(_ command: String, execute: Bool) {
+        guard let surfaceView = controller?.focusedSurface,
+              !surfaceView.readonly,
+              let surface = surfaceView.surfaceModel else { return }
+
+        // A trailing newline would run the command; Enter is sent separately if asked.
+        var text = command
+        while text.last?.isNewline == true {
+            text.removeLast()
+        }
+
+        if !text.isEmpty { surface.sendText(text) }
+        if execute { surface.sendEnter() }
+        Ghostty.moveFocus(to: surfaceView)
     }
 }

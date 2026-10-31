@@ -8,11 +8,44 @@ struct ClaudeSessionsSidebar: View {
     var body: some View {
         if model.isOpen {
             HStack(spacing: 0) {
-                ClaudeSessionsView(model: model)
-                    .frame(width: 260)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 2) {
+                        tabButton(.sessions, systemImage: "bubble.left.and.bubble.right", help: "CC 会话")
+                        tabButton(.commands, systemImage: "terminal", help: "CC 常用命令")
+                        Spacer()
+                        Button(action: model.close) {
+                            Image(systemName: "xmark")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("关闭")
+                    }
+
+                    switch model.tab {
+                    case .sessions: ClaudeSessionsView(model: model)
+                    case .commands: ClaudeCommandsView(model: model)
+                    }
+                }
+                .padding(8)
+                .frame(width: 260)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .background(Color(nsColor: .windowBackgroundColor))
                 Divider()
             }
         }
+    }
+
+    private func tabButton(_ tab: ClaudePanelTab, systemImage: String, help: String) -> some View {
+        Button { model.tab = tab } label: {
+            Image(systemName: systemImage)
+                .foregroundColor(model.tab == tab ? .accentColor : .secondary)
+                .frame(width: 26, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(model.tab == tab ? Color.accentColor.opacity(0.18) : Color.clear))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 }
 
@@ -48,10 +81,6 @@ struct ClaudeSessionsView: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .help("刷新")
-                Button(action: model.close) {
-                    Image(systemName: "xmark")
-                }
-                .help("关闭")
             }
             .buttonStyle(.borderless)
 
@@ -89,9 +118,6 @@ struct ClaudeSessionsView: View {
                 }
             }
         }
-        .padding(8)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private func placeholder(_ text: String) -> some View {

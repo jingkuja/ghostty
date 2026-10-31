@@ -52,14 +52,7 @@ enum ComposeBox {
         }
 
         if sendEnter {
-            for action: Ghostty.Input.Action in [.press, .release] {
-                surface.sendKeyEvent(Ghostty.Input.KeyEvent(
-                    synthesizing: .enter,
-                    action: action,
-                    mods: [],
-                    translationMods: []
-                ))
-            }
+            surface.sendEnter()
         }
 
         surfaceView.composeDraft = ""
