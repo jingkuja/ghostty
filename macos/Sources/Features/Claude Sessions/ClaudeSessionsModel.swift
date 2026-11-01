@@ -38,6 +38,8 @@ final class ClaudeSessionsModel: ObservableObject {
     let files = LocalFilesModel()
     /// The files tab's remote half, following the host the focused surface is logged in to
     let remote = RemoteFilesModel()
+    /// Copies between the files tab's halves
+    let transfers = FileTransfers()
 
     private weak var controller: TerminalController?
     private var liveSurfaces: [String: Weak<Ghostty.SurfaceView>] = [:]
@@ -49,6 +51,11 @@ final class ClaudeSessionsModel: ObservableObject {
 
     init(controller: TerminalController) {
         self.controller = controller
+        // Show what a transfer added. Both, since a remote folder can be on this Mac's disk.
+        transfers.didFinish = { [weak self] _ in
+            self?.files.reload()
+            self?.remote.reload()
+        }
     }
 
     func toggle() {

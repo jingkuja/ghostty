@@ -1,5 +1,9 @@
 import AppKit
+import os
 import SwiftUI
+import UniformTypeIdentifiers
+
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.mitchellh.ghostty", category: "files-tab")
 
 /// The local half of the files tab: a tree of the directory the focused surface is in,
 /// unless the user browsed somewhere else.
@@ -87,7 +91,8 @@ final class RemoteFilesModel: FileTreeModel {
     @Published private(set) var home: String?
 
     private var target: SSHTarget?
-    private var client: SFTPClient?
+    /// The connection, also held by transfers using it, which closes when no one holds it
+    private(set) var client: SFTPClient?
     private var connectTask: Task<Void, Never>?
     /// Logins that failed, with why, so that focusing their surface again doesn't retry
     /// (and ask for a password the user declined) until they reconnect.
@@ -136,7 +141,7 @@ final class RemoteFilesModel: FileTreeModel {
     func disconnect() {
         connectTask?.cancel()
         connectTask = nil
-        client?.close()
+        // Not closed: transfers still using it keep it open until they finish.
         client = nil
         target = nil
         state = .idle
@@ -171,7 +176,6 @@ final class RemoteFilesModel: FileTreeModel {
 
     private func connect(_ target: SSHTarget) {
         connectTask?.cancel()
-        client?.close()
         client = nil
         self.target = target
         state = .connecting
@@ -208,6 +212,52 @@ final class RemoteFilesModel: FileTreeModel {
         }
     }
 
+    // MARK: Changes
+
+    func createFolder(in directory: String) {
+        guard let client, let name = Prompt.text("新建文件夹", message: "在 \(displayPath(directory)) 中新建：",
+                                                 value: "未命名文件夹", confirm: "新建") else { return }
+        run { try await client.mkdir(FileEntry.join(directory, name), permissions: 0o755) }
+    }
+
+    func rename(_ entry: FileEntry) {
+        guard let client, let name = Prompt.text("重命名", message: "“\(entry.name)”的新名称：",
+                                                 value: entry.name, confirm: "重命名"),
+              name != entry.name else { return }
+        let destination = FileEntry.join((entry.path as NSString).deletingLastPathComponent, name)
+        run {
+            // SFTP's rename doesn't replace, but check so the error says why.
+            if (try? await client.lstat(destination)) != nil { throw RemoteChangeError.exists(name) }
+            try await client.rename(entry.path, to: destination)
+        }
+    }
+
+    func delete(_ entry: FileEntry) {
+        guard let client else { return }
+        let alert = NSAlert()
+        alert.messageText = "删除“\(entry.name)”？"
+        alert.informativeText = entry.isDirectory && !entry.isSymlink
+            ? "将从 \(title ?? "远程主机") 永久删除该文件夹及其中的所有内容，无法恢复。"
+            : "将从 \(title ?? "远程主机") 永久删除，无法恢复。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "删除")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        run { try await SFTPTransfer.removeRecursively(entry.path, client: client) }
+    }
+
+    /// Runs a change, then shows the result or the error.
+    private func run(_ change: @escaping @Sendable () async throws -> Void) {
+        Task {
+            do {
+                try await change()
+            } catch {
+                NSAlert(error: error).runModal()
+            }
+            reload()
+        }
+    }
+
     override func list(_ directory: String) async -> Result<[FileEntry], Error> {
         guard let client else { return .failure(SFTPError.disconnected("")) }
         do {
@@ -237,17 +287,132 @@ final class RemoteFilesModel: FileTreeModel {
     }
 }
 
+enum RemoteChangeError: LocalizedError {
+    case exists(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .exists(let name): return "“\(name)”已存在"
+        }
+    }
+}
+
+/// Asks for a line of text, like a new name.
+@MainActor
+enum Prompt {
+    static func text(_ title: String, message: String, value: String, confirm: String) -> String? {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        let field = NSTextField(string: value)
+        field.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: confirm)
+        alert.addButton(withTitle: "取消")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !text.contains("/") else { return nil }
+        return text
+    }
+}
+
+/// What dragging between the files tab's halves carries.
+enum FileDrag {
+    /// A remote path (declared in Info.plist)
+    static let remoteType = UTType(exportedAs: "com.mitchellh.ghosttyRemoteFilePath")
+
+    /// A local row's drag: its file URL, which a terminal types as a path, Finder copies,
+    /// and the remote half uploads.
+    static func localProvider(_ url: URL) -> NSItemProvider {
+        NSItemProvider(object: url as NSURL)
+    }
+
+    /// A remote row's drag: its path for the local half, and the path as text for a
+    /// terminal, which is likely logged in to the same host.
+    static func remoteProvider(_ path: String) -> NSItemProvider {
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(forTypeIdentifier: remoteType.identifier, visibility: .all) { completion in
+            completion(Data(path.utf8), nil)
+            return nil
+        }
+        provider.registerObject(path.shellQuoted as NSString, visibility: .all)
+        return provider
+    }
+
+    static func loadRemotePaths(_ providers: [NSItemProvider], _ completion: @escaping @MainActor ([String]) -> Void) -> Bool {
+        logger.notice("drop: \(providers.count) remote item(s)")
+        guard !providers.isEmpty else { return false }
+        collect(providers, completion) { provider, done in
+            _ = provider.loadDataRepresentation(forTypeIdentifier: remoteType.identifier) { data, error in
+                if let error { logger.error("drop: loading a remote path failed: \(error.localizedDescription)") }
+                done(data.map { String(decoding: $0, as: UTF8.self) })
+            }
+        }
+        return true
+    }
+
+    /// Files dragged from the local half or Finder.
+    static func loadFileURLs(_ providers: [NSItemProvider], _ completion: @escaping @MainActor ([String]) -> Void) -> Bool {
+        logger.notice("drop: \(providers.count) file URL item(s)")
+        guard !providers.isEmpty else { return false }
+        collect(providers, completion) { provider, done in
+            _ = provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, error in
+                if let data, let url = URL(dataRepresentation: data, relativeTo: nil), url.isFileURL {
+                    return done(url.path)
+                }
+                if let error { logger.error("drop: loading a file URL failed: \(error.localizedDescription)") }
+                // Some sources only give the URL as an object.
+                _ = provider.loadObject(ofClass: NSURL.self) { object, _ in
+                    done((object as? URL)?.path)
+                }
+            }
+        }
+        return true
+    }
+
+    /// Loads a string from each provider, then calls `completion` on the main actor with
+    /// them in the providers' order.
+    private static func collect(
+        _ providers: [NSItemProvider],
+        _ completion: @escaping @MainActor ([String]) -> Void,
+        load: (NSItemProvider, @escaping @Sendable (String?) -> Void) -> Void
+    ) {
+        let lock = NSLock()
+        nonisolated(unsafe) var results = [String?](repeating: nil, count: providers.count)
+        let group = DispatchGroup()
+        for (index, provider) in providers.enumerated() {
+            group.enter()
+            load(provider) { value in
+                lock.withLock { results[index] = value }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) {
+            let paths = lock.withLock { results.compactMap { $0 } }
+            logger.notice("drop: loaded \(paths.count) of \(providers.count) path(s)")
+            Task { @MainActor in completion(paths) }
+        }
+    }
+}
+
 struct FilesView: View {
     @ObservedObject var model: ClaudeSessionsModel
     @ObservedObject var files: LocalFilesModel
     @ObservedObject var remote: RemoteFilesModel
+    @ObservedObject var transfers: FileTransfers
 
     var body: some View {
         VSplitView {
-            LocalFilesPane(model: model, files: files)
+            LocalFilesPane(model: model, files: files, remote: remote)
                 .frame(minHeight: 120, maxHeight: .infinity)
-            RemoteFilesPane(model: model, remote: remote)
-                .frame(minHeight: 120, maxHeight: .infinity)
+            VStack(spacing: 0) {
+                RemoteFilesPane(model: model, files: files, remote: remote)
+                if !transfers.items.isEmpty {
+                    TransfersView(transfers: transfers)
+                }
+            }
+            .frame(minHeight: 120, maxHeight: .infinity)
         }
         .onAppear(perform: model.refresh)
     }
@@ -256,6 +421,8 @@ struct FilesView: View {
 private struct LocalFilesPane: View {
     @ObservedObject var model: ClaudeSessionsModel
     @ObservedObject var files: LocalFilesModel
+    @ObservedObject var remote: RemoteFilesModel
+    @State private var targeted = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -300,14 +467,28 @@ private struct LocalFilesPane: View {
                         tooltip: FileTreeRow<EmptyView>.tooltip(entry, path: entry.path.abbreviatingHome),
                         open: { open(entry) },
                         drag: {
-                            // Dropping on a terminal types the path, like a drag from Finder.
-                            NSItemProvider(contentsOf: url(entry)) ?? NSItemProvider()
+                            // Dropping on a terminal types the path, like a drag from Finder;
+                            // dropping on the remote half uploads it.
+                            FileDrag.localProvider(url(entry))
                         },
+                        drop: download(into: entry.path),
                         menu: { menu(entry) })
                 }
+                .background(targeted ? Color.accentColor.opacity(0.08) : Color.clear)
+                .fileTreeDrop(download(into: files.root ?? "/"), targeted: $targeted)
             }
         }
         .padding(.bottom, 6)
+    }
+
+    /// Downloads remote rows dropped on a folder into it.
+    private func download(into directory: String) -> FileTreeDrop {
+        FileTreeDrop(types: [FileDrag.remoteType]) { providers in
+            FileDrag.loadRemotePaths(providers) { paths in
+                guard let client = remote.client else { return logger.error("drop: no remote connection to download from") }
+                model.transfers.download(paths, to: directory, client: client, host: remote.title ?? "")
+            }
+        }
     }
 
     private func url(_ entry: FileEntry) -> URL {
@@ -325,6 +506,13 @@ private struct LocalFilesPane: View {
 
     @ViewBuilder
     private func menu(_ entry: FileEntry) -> some View {
+        if remote.state == .connected, let client = remote.client, let destination = remote.root {
+            Button("上传到 \(remote.displayPath(destination))") {
+                model.transfers.upload([entry.path], to: destination, client: client,
+                                       host: remote.title ?? "", displayDirectory: remote.displayPath(destination))
+            }
+            Divider()
+        }
         if entry.isDirectory {
             Button("进入该目录") { files.browse(entry.path) }
             Button("在新标签页中打开") { model.runInNewTab("", directory: entry.path) }
@@ -342,8 +530,10 @@ private struct LocalFilesPane: View {
 
 private struct RemoteFilesPane: View {
     @ObservedObject var model: ClaudeSessionsModel
+    @ObservedObject var files: LocalFilesModel
     @ObservedObject var remote: RemoteFilesModel
     @ObservedObject var hosts = SSHHostStore.shared
+    @State private var targeted = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -361,6 +551,12 @@ private struct RemoteFilesPane: View {
                         Image(systemName: "house")
                     }
                     .help("家目录")
+                    Button {
+                        if let root = remote.root { remote.createFolder(in: root) }
+                    } label: {
+                        Image(systemName: "folder.badge.plus")
+                    }
+                    .help("新建文件夹")
                     HiddenFilesButton(tree: remote)
                     Button(action: remote.reload) {
                         Image(systemName: "arrow.clockwise")
@@ -426,20 +622,55 @@ private struct RemoteFilesPane: View {
                     depth: depth,
                     tree: remote,
                     tooltip: FileTreeRow<EmptyView>.tooltip(entry, path: remote.displayPath(entry.path)),
-                    open: { if entry.isDirectory { remote.browse(entry.path) } },
+                    open: { open(entry) },
+                    drag: { FileDrag.remoteProvider(entry.path) },
+                    drop: upload(into: entry.path),
                     menu: { menu(entry) })
             }
+            .background(targeted ? Color.accentColor.opacity(0.08) : Color.clear)
+            .fileTreeDrop(upload(into: remote.root ?? "/"), targeted: $targeted)
+        }
+    }
+
+    /// Uploads files from the local half or Finder dropped on a folder into it.
+    private func upload(into directory: String) -> FileTreeDrop {
+        FileTreeDrop(types: [.fileURL]) { providers in
+            FileDrag.loadFileURLs(providers) { paths in
+                guard let client = remote.client else { return logger.error("drop: no remote connection to upload to") }
+                model.transfers.upload(paths, to: directory, client: client, host: remote.title ?? "",
+                                       displayDirectory: remote.displayPath(directory))
+            }
+        }
+    }
+
+    /// Double-clicking browses into a directory and opens a file with its default app,
+    /// from a temporary copy.
+    private func open(_ entry: FileEntry) {
+        if entry.isDirectory {
+            remote.browse(entry.path)
+        } else if let client = remote.client {
+            model.transfers.open(entry.path, client: client, host: remote.title ?? "")
         }
     }
 
     @ViewBuilder
     private func menu(_ entry: FileEntry) -> some View {
+        if let client = remote.client, let destination = files.root {
+            Button("下载到 \(destination.abbreviatingHome)") {
+                model.transfers.download([entry.path], to: destination, client: client, host: remote.title ?? "")
+            }
+            if !entry.isDirectory {
+                Button("打开（下载到临时文件夹）") { open(entry) }
+            }
+            Divider()
+        }
         if entry.isDirectory {
             Button("进入该目录") { remote.browse(entry.path) }
             if remote.followsTerminal {
                 // The focused surface is logged in to this host, so a cd there moves its shell.
                 Button("在当前标签页中 cd 到该目录") { model.insert("cd " + entry.path.shellQuoted, execute: true) }
             }
+            Button("在此新建文件夹…") { remote.createFolder(in: entry.path) }
             Divider()
         }
         if remote.followsTerminal {
@@ -447,6 +678,9 @@ private struct RemoteFilesPane: View {
         }
         Button("复制路径") { Pasteboard.copy(entry.path) }
         Button("复制名称") { Pasteboard.copy(entry.name) }
+        Divider()
+        Button("重命名…") { remote.rename(entry) }
+        Button("删除…") { remote.delete(entry) }
     }
 
     private var optionsMenu: some View {
@@ -484,6 +718,115 @@ private struct RemoteFilesPane: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help("远程选项")
+    }
+}
+
+/// The transfer queue, below the remote files.
+private struct TransfersView: View {
+    @ObservedObject var transfers: FileTransfers
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Divider()
+            HStack {
+                Text("传输")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.secondary)
+                Spacer()
+                if transfers.items.contains(where: { $0.status.isFinished }) {
+                    Button("清除已完成", action: transfers.clearFinished)
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                }
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(transfers.items.reversed()) { item in
+                        TransferRow(item: item) { transfers.cancel(item.id) }
+                    }
+                }
+            }
+            // About three rows; more scroll.
+            .frame(height: min(CGFloat(transfers.items.count) * 46, 140))
+        }
+        .padding(.top, 4)
+    }
+}
+
+private struct TransferRow: View {
+    let item: FileTransfers.Item
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Image(systemName: item.direction == .upload ? "arrow.up.circle" : "arrow.down.circle")
+                    .foregroundColor(.secondary)
+                Text(item.name)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 4)
+                statusIcon
+            }
+            .font(.caption)
+            if item.status == .running {
+                ProgressView(value: item.total > 0 ? min(Double(item.done) / Double(item.total), 1) : 0)
+                    .progressViewStyle(.linear)
+                    .controlSize(.small)
+            }
+            Text(detail)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .help(help)
+    }
+
+    @ViewBuilder
+    private var statusIcon: some View {
+        switch item.status {
+        case .queued, .running:
+            Button(action: cancel) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("取消")
+        case .done:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundColor(.green)
+        case .failed:
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundColor(.red)
+        case .cancelled:
+            Image(systemName: "minus.circle")
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var detail: String {
+        let size = { (bytes: UInt64) in ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .file) }
+        switch item.status {
+        case .queued:
+            return "等待中 · 到 \(item.destination)"
+        case .running:
+            var text = item.total > 0 ? "\(size(item.done)) / \(size(item.total))" : size(item.done)
+            if item.speed > 0 { text += " · \(size(UInt64(item.speed)))/s" }
+            return text
+        case .done:
+            return "已完成 · \(size(item.total)) · 到 \(item.destination)"
+        case .failed(let message):
+            return "失败：\(message)"
+        case .cancelled:
+            return "已取消"
+        }
+    }
+
+    private var help: String {
+        let place = item.direction == .upload ? "\(item.host):\(item.destination)" : item.destination
+        if case .failed(let message) = item.status { return "\(item.name) → \(place)\n\(message)" }
+        return "\(item.name) → \(place)"
     }
 }
 

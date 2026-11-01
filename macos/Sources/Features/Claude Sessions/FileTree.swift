@@ -169,9 +169,12 @@ struct FileTreeRow<Menu: View>: View {
     let open: () -> Void
     /// Gives what dragging the row carries; the row can't be dragged without it.
     var drag: (() -> NSItemProvider)?
+    /// What a directory row accepts dropped on it
+    var drop: FileTreeDrop?
     @ViewBuilder let menu: () -> Menu
 
     @State private var hovered = false
+    @State private var targeted = false
 
     private var isSelected: Bool { tree.selection == entry.path }
 
@@ -182,9 +185,10 @@ struct FileTreeRow<Menu: View>: View {
             .padding(.vertical, 2)
             .background(
                 RoundedRectangle(cornerRadius: 4)
-                    .fill(isSelected ? Color.accentColor.opacity(0.25) : hovered ? Color.primary.opacity(0.08) : Color.clear))
+                    .fill(isSelected || targeted ? Color.accentColor.opacity(0.25) : hovered ? Color.primary.opacity(0.08) : Color.clear))
             .contentShape(Rectangle())
             .onHover { hovered = $0 }
+            .modifier(DropModifier(drop: entry.isDirectory ? drop : nil, targeted: $targeted))
             .gesture(TapGesture(count: 2).onEnded(open))
             .simultaneousGesture(TapGesture().onEnded {
                 tree.selection = entry.path
@@ -226,6 +230,49 @@ struct FileTreeRow<Menu: View>: View {
             lines.append("修改于 " + modified.formatted(date: .numeric, time: .shortened))
         }
         return lines.joined(separator: "\n")
+    }
+}
+
+/// Items a file tree accepts dropped on it, and what to do with them.
+struct FileTreeDrop {
+    let types: [UTType]
+    let perform: ([NSItemProvider]) -> Bool
+}
+
+private struct DropModifier: ViewModifier {
+    let drop: FileTreeDrop?
+    @Binding var targeted: Bool
+
+    func body(content: Content) -> some View {
+        if let drop {
+            content.fileTreeDrop(drop, targeted: $targeted)
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    /// Accepts the drop's types on the view, highlighting it while they are dragged over.
+    func fileTreeDrop(_ drop: FileTreeDrop, targeted: Binding<Bool>) -> some View {
+        onDrop(of: drop.types, delegate: FileTreeDropDelegate(drop: drop, targeted: targeted))
+    }
+}
+
+/// Hands a drop only the items of the accepted types, which is what loads reliably;
+/// the providers `onDrop(of:perform:)` passes don't always load.
+private struct FileTreeDropDelegate: DropDelegate {
+    let drop: FileTreeDrop
+    @Binding var targeted: Bool
+
+    func validateDrop(info: DropInfo) -> Bool { info.hasItemsConforming(to: drop.types) }
+    func dropEntered(info: DropInfo) { targeted = true }
+    func dropExited(info: DropInfo) { targeted = false }
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .copy) }
+
+    func performDrop(info: DropInfo) -> Bool {
+        targeted = false
+        return drop.perform(info.itemProviders(for: drop.types))
     }
 }
 

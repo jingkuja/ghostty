@@ -122,6 +122,18 @@
 			<key>UTTypeTagSpecification</key>
 			<dict/>
 		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.mitchellh.ghosttyRemoteFilePath</string>
+			<key>UTTypeDescription</key>
+			<string>Ghostty Remote File Path</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict/>
+		</dict>
 	</array>
 </dict>
 </plist>

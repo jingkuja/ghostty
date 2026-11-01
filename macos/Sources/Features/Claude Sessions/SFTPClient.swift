@@ -74,6 +74,7 @@ final class SFTPClient: @unchecked Sendable {
         static let data: UInt8 = 103
         static let name: UInt8 = 104
         static let attrs: UInt8 = 105
+        static let extended: UInt8 = 200
     }
 
     /// Flags for `open`
@@ -103,6 +104,8 @@ final class SFTPClient: @unchecked Sendable {
     private var nextID: UInt32 = 1
     private var pending: [UInt32: CheckedContinuation<Reply, Error>] = [:]
     private var versionContinuation: CheckedContinuation<Void, Error>?
+    /// The extensions the server announced, like `posix-rename@openssh.com`
+    private var extensions: Set<String> = []
     private var received = Data()
     private var closedError: SFTPError?
     private var outputEnded = false
@@ -293,6 +296,21 @@ final class SFTPClient: @unchecked Sendable {
         }
     }
 
+    /// Renames, replacing what is at `to`. Without the server's posix-rename extension
+    /// (OpenSSH has it), what is there is removed first, which isn't atomic.
+    func replace(_ from: String, with to: String) async throws {
+        if lock.withLock({ extensions.contains("posix-rename@openssh.com") }) {
+            try await statusRequest(PacketType.extended) {
+                $0.string("posix-rename@openssh.com")
+                $0.string(from)
+                $0.string(to)
+            }
+        } else {
+            try? await remove(to)
+            try await rename(from, to: to)
+        }
+    }
+
     func setAttributes(_ path: String, _ attributes: SFTPAttributes) async throws {
         try await statusRequest(PacketType.setstat) {
             $0.string(path)
@@ -375,6 +393,10 @@ final class SFTPClient: @unchecked Sendable {
                 received.removeFirst(4 + length)
                 guard let type = try? reader.u8() else { continue }
                 if type == PacketType.version {
+                    _ = try? reader.u32()
+                    while let name = try? reader.string(), (try? reader.bytes()) != nil {
+                        extensions.insert(name)
+                    }
                     version = versionContinuation
                     versionContinuation = nil
                 } else if let id = try? reader.u32(), let continuation = pending.removeValue(forKey: id) {
