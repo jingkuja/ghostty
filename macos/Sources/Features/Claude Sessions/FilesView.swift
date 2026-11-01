@@ -89,8 +89,19 @@ final class RemoteFilesModel: FileTreeModel {
     /// Whether the login is the one in the focused surface, rather than a saved host
     @Published private(set) var followsTerminal = true
     @Published private(set) var home: String?
+    /// Whether `root` moves along with the remote shell's directory, read from the title
+    @Published private(set) var followsShell = true
+    /// The remote shell's directory, when the title says where it is on this host
+    @Published private(set) var shellDirectory: String?
+    /// Why the shell's directory isn't followed, like the shell being on another host
+    @Published private(set) var shellNotice: String?
 
     private var target: SSHTarget?
+    private var connection: SSHConnector.Connection?
+    /// The host's name as `uname -n` gives it, to tell a title from this host from one from
+    /// a host ssh'd to from here
+    private var hostname: String?
+    private var shellTitle: String?
     /// The connection, also held by transfers using it, which closes when no one holds it
     private(set) var client: SFTPClient?
     private var connectTask: Task<Void, Never>?
@@ -143,22 +154,79 @@ final class RemoteFilesModel: FileTreeModel {
         connectTask = nil
         // Not closed: transfers still using it keep it open until they finish.
         client = nil
+        connection = nil
         target = nil
         state = .idle
         title = nil
         home = nil
+        resetShell()
         setRoot(nil)
     }
 
-    func browse(_ path: String) { setRoot(path) }
+    /// Shows the directory; it stops following the shell unless it is the shell's directory.
+    func browse(_ path: String) {
+        followsShell = path == shellDirectory
+        setRoot(path)
+    }
 
     func browseParent() {
         guard let root, root != "/" else { return }
-        setRoot((root as NSString).deletingLastPathComponent)
+        browse((root as NSString).deletingLastPathComponent)
     }
 
     func browseHome() {
-        if let home { setRoot(home) }
+        if let home { browse(home) }
+    }
+
+    // MARK: Following the shell
+
+    /// The focused surface's title changed; it may say where the remote shell is.
+    func shellTitleDidChange(_ title: String) {
+        shellTitle = title
+        applyShellTitle()
+    }
+
+    /// Goes back to following the shell's directory.
+    func followShell() {
+        followsShell = true
+        if let shellDirectory { setRoot(shellDirectory) }
+    }
+
+    private func resetShell() {
+        followsShell = true
+        shellDirectory = nil
+        shellNotice = nil
+        hostname = nil
+    }
+
+    private func applyShellTitle() {
+        // Only the focused surface's login has its shell in the title.
+        guard followsTerminal, state == .connected, let client, let shellTitle,
+              let shell = ShellTitle.parse(shellTitle) else { return }
+
+        if let hostname, !shell.isHost(hostname) {
+            setShellNotice("终端当前在 \(shell.host) 上，这里显示的是 \(hostname) 的文件")
+            return
+        }
+        let user = connection?.user
+        if let user, shell.user != user {
+            setShellNotice("终端当前用户是 \(shell.user)，这里以 \(user) 的身份访问")
+        } else {
+            setShellNotice(nil)
+        }
+
+        guard let path = shell.absolutePath(loginUser: user, home: home), path != shellDirectory else { return }
+        Task {
+            // Follow only to a directory that is there, as this user sees it.
+            guard (try? await client.stat(path))?.isDirectory == true,
+                  client === self.client, ShellTitle.parse(self.shellTitle ?? "") == shell else { return }
+            self.shellDirectory = path
+            if self.followsShell { self.setRoot(path) }
+        }
+    }
+
+    private func setShellNotice(_ notice: String?) {
+        if shellNotice != notice { shellNotice = notice }
     }
 
     /// The path with the home directory shown as `~`.
@@ -177,22 +245,27 @@ final class RemoteFilesModel: FileTreeModel {
     private func connect(_ target: SSHTarget) {
         connectTask?.cancel()
         client = nil
+        connection = nil
         self.target = target
         state = .connecting
         title = target.commandLine.destination
         home = nil
+        resetShell()
         setRoot(nil)
 
         connectTask = Task { [weak self] in
             do {
                 let connection = try await SSHConnector.connect(target)
                 let home = try await connection.client.realpath(".")
+                let hostname = await connection.run("uname -n")?.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard let self, self.target == target, !Task.isCancelled else {
                     connection.client.close()
                     return
                 }
                 let client = connection.client
                 self.client = client
+                self.connection = connection
+                self.hostname = hostname?.isEmpty == false ? hostname : nil
                 self.title = connection.title
                 self.home = home
                 self.state = .connected
@@ -204,6 +277,7 @@ final class RemoteFilesModel: FileTreeModel {
                     }
                 }
                 self.setRoot(home)
+                self.applyShellTitle()
             } catch {
                 guard let self, self.target == target, !Task.isCancelled else { return }
                 self.failures[target] = error.localizedDescription
@@ -551,6 +625,16 @@ private struct RemoteFilesPane: View {
                         Image(systemName: "house")
                     }
                     .help("家目录")
+                    if remote.followsTerminal {
+                        let following = remote.followsShell && remote.shellDirectory != nil
+                        Button(action: remote.followShell) {
+                            Image(systemName: following ? "location.fill" : "location")
+                                .foregroundColor(following ? .accentColor : nil)
+                        }
+                        .help(remote.shellDirectory == nil
+                            ? "跟随终端中远程 shell 的目录（从标签页标题读取，当前标题中没有目录信息）"
+                            : following ? "正在跟随终端中远程 shell 的目录" : "回到终端中远程 shell 的目录")
+                    }
                     Button {
                         if let root = remote.root { remote.createFolder(in: root) }
                     } label: {
@@ -574,6 +658,14 @@ private struct RemoteFilesPane: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(remote.root.map { "\(title):\($0)" } ?? title)
+            }
+
+            if remote.state == .connected, let notice = remote.shellNotice {
+                Label(notice, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+                    .lineLimit(2)
+                    .help(notice)
             }
 
             content

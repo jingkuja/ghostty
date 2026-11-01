@@ -20,6 +20,21 @@ enum SSHConnector {
         let client: SFTPClient
         /// The login as `user@host`, with the port if it isn't 22
         let title: String
+        /// The user logged in as
+        let user: String?
+        /// The arguments to ssh, up to and including the destination, that run a command
+        /// over the connection's master without authenticating
+        fileprivate let commandArguments: [String]
+        fileprivate let environment: [String: String]
+
+        /// Runs a command on the host over the logged in connection and returns its output,
+        /// or nil if it failed.
+        func run(_ command: String) async -> String? {
+            let arguments = commandArguments + ["--", command]
+            let environment = environment
+            let result = await SSHConnector.background { SSHRunner.run(arguments, environment: environment) }
+            return result.status == 0 ? result.output : nil
+        }
     }
 
     /// Options for a connection that only transfers files, ahead of the user's so they
@@ -47,6 +62,16 @@ enum SSHConnector {
             return environment
         }()
         let sftp = commandLine.options + ["-s", commandLine.destination, "sftp"]
+        func connection(_ client: SFTPClient, _ controlPath: String) -> Connection {
+            Connection(
+                client: client,
+                title: title,
+                user: config["user"],
+                commandArguments: fileTransferOptions
+                    + ["-o", "ControlMaster=no", "-o", "ControlPath=\(controlPath)", "-o", "BatchMode=yes"]
+                    + commandLine.options + [commandLine.destination],
+                environment: environment)
+        }
 
         // 1. An existing master.
         if let path = config["controlpath"], path != "none", FileManager.default.fileExists(atPath: path) {
@@ -59,7 +84,7 @@ enum SSHConnector {
                    sshArguments: fileTransferOptions
                        + ["-o", "ControlMaster=no", "-o", "ControlPath=\(path)", "-o", "BatchMode=yes"] + sftp,
                    environment: environment) {
-                return Connection(client: client, title: title)
+                return connection(client, path)
             }
         }
 
@@ -73,7 +98,7 @@ enum SSHConnector {
         do {
             let client = try await SFTPClient.connect(
                 sshArguments: master + ["-o", "BatchMode=yes"] + sftp, environment: environment)
-            return Connection(client: client, title: title)
+            return connection(client, SSHHost.controlPath)
         } catch SFTPError.disconnected(let message) where needsPrompt(message) {
             // 3. Prompting, below.
         }
@@ -84,7 +109,7 @@ enum SSHConnector {
         prompting["GHOSTTY_SSH_TARGET"] = title
         let client = try await SFTPClient.connect(
             sshArguments: master + ["-o", "BatchMode=no"] + sftp, environment: prompting)
-        return Connection(client: client, title: title)
+        return connection(client, SSHHost.controlPath)
     }
 
     /// Whether a login failed for want of something only the user can give.
@@ -109,7 +134,7 @@ enum SSHConnector {
     }
 
     /// Runs blocking work, like waiting for an ssh process, off the concurrency pool.
-    private static func background<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+    fileprivate static func background<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async { continuation.resume(returning: work()) }
         }

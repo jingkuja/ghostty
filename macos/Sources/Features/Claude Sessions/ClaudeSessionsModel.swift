@@ -42,6 +42,9 @@ final class ClaudeSessionsModel: ObservableObject {
     let transfers = FileTransfers()
 
     private weak var controller: TerminalController?
+    /// The surface whose title the remote files follow, and that subscription
+    private weak var titleSurface: Ghostty.SurfaceView?
+    private var titleCancellable: AnyCancellable?
     private var liveSurfaces: [String: Weak<Ghostty.SurfaceView>] = [:]
     /// Surfaces by foreground PID, as collected for the refresh in progress
     private var refreshSurfaces: [Int: Weak<Ghostty.SurfaceView>] = [:]
@@ -87,6 +90,8 @@ final class ClaudeSessionsModel: ObservableObject {
         timer = nil
         // Don't hold a connection (and the master it keeps alive) for a closed panel.
         remote.disconnect()
+        titleCancellable = nil
+        titleSurface = nil
     }
 
     /// The focused surface reported a new working directory.
@@ -108,7 +113,9 @@ final class ClaudeSessionsModel: ObservableObject {
         guard isOpen else { return }
         if tab == .files {
             files.reload()
-            remote.update(foregroundProcessGroup: controller?.focusedSurface?.surfaceModel?.foregroundPID)
+            let focused = controller?.focusedSurface
+            remote.update(foregroundProcessGroup: focused?.surfaceModel?.foregroundPID)
+            observeTitle(of: focused)
             remote.reload()
         }
         guard !refreshing else {
@@ -178,6 +185,16 @@ final class ClaudeSessionsModel: ObservableObject {
         config.initialInput = "claude --resume \(session.id)\(fork ? " --fork-session" : "")\n"
         _ = TerminalController.newTab(controller.ghostty, from: controller.window, withBaseConfig: config)
         refresh()
+    }
+
+    /// Passes the surface's title, which can say where a remote shell is, to the remote files.
+    private func observeTitle(of surface: Ghostty.SurfaceView?) {
+        guard surface !== titleSurface || titleCancellable == nil else { return }
+        titleSurface = surface
+        titleCancellable = surface?.$title
+            .removeDuplicates()
+            .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
+            .sink { [weak self] title in self?.remote.shellTitleDidChange(title) }
     }
 
     /// Opens a new tab in this window that types the command, if any, into its shell and runs it,
