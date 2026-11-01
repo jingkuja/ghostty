@@ -10,16 +10,16 @@ struct ClaudeSessionsSidebar: View {
             HStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 2) {
+                        tabButton(.ssh, systemImage: "network", help: "SSH 主机")
                         tabButton(.commands, systemImage: "terminal", help: "CLI 命令")
                         tabButton(.files, systemImage: "folder", help: "文件")
-                        tabButton(.ssh, systemImage: "network", help: "SSH 主机")
                         tabButton(.sessions, systemImage: "bubble.left.and.bubble.right", help: "CC 会话")
                         Spacer()
-                        Button(action: model.close) {
-                            Image(systemName: "xmark")
+                        Button(action: model.toggle) {
+                            Image(systemName: "sidebar.left")
                         }
                         .buttonStyle(.borderless)
-                        .help("关闭")
+                        .help("隐藏侧边栏")
                     }
 
                     switch model.tab {

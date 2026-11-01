@@ -1128,6 +1128,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         window.contentView = container
 
+        if ClaudeSessionsModel.opensByDefault { claudeSessions.open() }
+
         // If we have a default size, we want to apply it.
         if let defaultSize {
             defaultSize.apply(to: window)

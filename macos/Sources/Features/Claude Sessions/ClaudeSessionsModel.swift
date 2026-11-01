@@ -3,9 +3,9 @@ import Combine
 
 /// The tabs of the panel on the left of a terminal window.
 enum ClaudePanelTab {
+    case ssh
     case commands
     case files
-    case ssh
     case sessions
 }
 
@@ -24,7 +24,7 @@ final class ClaudeSessionsModel: ObservableObject {
     private static let queue = DispatchQueue(label: "com.mitchellh.ghostty.claude-sessions", qos: .utility)
 
     @Published private(set) var isOpen = false
-    @Published var tab: ClaudePanelTab = .commands
+    @Published var tab: ClaudePanelTab = .ssh
     @Published private(set) var directory: String?
     @Published private(set) var sessions: [ClaudeSession] = []
     @Published private(set) var loading = false
@@ -61,7 +61,15 @@ final class ClaudeSessionsModel: ObservableObject {
         }
     }
 
+    /// Whether new windows open with the panel shown: it is unless it was last hidden.
+    private static let openDefaultsKey = "ClaudePanelOpen"
+    static var opensByDefault: Bool {
+        UserDefaults.standard.object(forKey: openDefaultsKey) as? Bool ?? true
+    }
+
+    /// Shows or hides the panel at the user's request, which new windows follow.
     func toggle() {
+        UserDefaults.standard.set(!isOpen, forKey: Self.openDefaultsKey)
         if isOpen {
             close()
         } else {

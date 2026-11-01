@@ -25,6 +25,16 @@ class TerminalWindow: NSWindow {
     /// Update notification UI in titlebar
     private let updateAccessory = NSTitlebarAccessoryViewController()
 
+    /// Shows and hides the Claude Code panel, next to the traffic lights
+    private let sidebarAccessory = NSTitlebarAccessoryViewController()
+    /// The sidebar button, followed by the title when it is drawn at the leading edge
+    private var sidebarTitleView: SidebarTitleAccessoryView?
+
+    /// Styles that move tabs into the titlebar show titles there, so they keep AppKit's.
+    private var leadsWithTitle: Bool {
+        !(self is TitlebarTabsTahoeTerminalWindow || self is TitlebarTabsVenturaTerminalWindow)
+    }
+
     /// Visual indicator that mirrors the selected tab color.
     private lazy var tabColorIndicator: NSHostingView<TabColorIndicatorView> = {
         let view = NSHostingView(rootView: TabColorIndicatorView(tabColor: tabColor))
@@ -134,6 +144,18 @@ class TerminalWindow: NSWindow {
         // Create our reset zoom titlebar accessory. We have to have a title
         // to do this or AppKit triggers an assertion.
         if styleMask.contains(.titled) {
+            // The title follows the sidebar button at the leading edge, where it reads
+            // better than centered; AppKit's own, with its proxy icon, is hidden for it.
+            let accessory = SidebarTitleAccessoryView(showsTitle: leadsWithTitle)
+            sidebarTitleView = accessory
+            if leadsWithTitle {
+                titleVisibility = .hidden
+                accessory.update(title: title, url: representedURL, font: titlebarFont, isKey: isKeyWindow)
+            }
+            sidebarAccessory.layoutAttribute = .leading
+            sidebarAccessory.view = accessory
+            addTitlebarAccessoryViewController(sidebarAccessory)
+
             resetZoomAccessory.layoutAttribute = .right
             resetZoomAccessory.view = NSHostingView(rootView: ResetZoomAccessoryView(
                 viewModel: viewModel,
@@ -189,42 +211,16 @@ class TerminalWindow: NSWindow {
             return
         }
 
-        if handleDocumentIconClick(event) {
-            return
-        }
-
         super.sendEvent(event)
     }
 
-    /// A plain click on the titlebar's folder (proxy) icon toggles the Claude Code sessions
-    /// panel. Dragging the icon and Command-clicking it for the path menu work as usual.
-    private func handleDocumentIconClick(_ event: NSEvent) -> Bool {
-        guard event.type == .leftMouseDown,
-              event.clickCount == 1,
-              event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
-              let controller = terminalController,
-              let button = standardWindowButton(.documentIconButton),
-              !button.isHiddenOrHasHiddenAncestor,
-              button.bounds.contains(button.convert(event.locationInWindow, from: nil))
-        else { return false }
+    private func syncSidebarTitle() {
+        guard leadsWithTitle else { return }
+        sidebarTitleView?.update(title: title, url: representedURL, font: titlebarFont, isKey: isKeyWindow)
+    }
 
-        // Track the mouse until it is released or starts dragging the icon.
-        while let next = nextEvent(matching: [.leftMouseUp, .leftMouseDragged]) {
-            if next.type == .leftMouseUp {
-                controller.toggleClaudeSessions(self)
-                return true
-            }
-
-            let dx = next.locationInWindow.x - event.locationInWindow.x
-            let dy = next.locationInWindow.y - event.locationInWindow.y
-            if dx * dx + dy * dy >= 9 {
-                // Hand the drag to the icon: it gets the mouse down, then this drag.
-                postEvent(next, atStart: true)
-                return false
-            }
-        }
-
-        return false
+    override var representedURL: URL? {
+        didSet { syncSidebarTitle() }
     }
 
     override func close() {
@@ -236,11 +232,13 @@ class TerminalWindow: NSWindow {
     override func becomeKey() {
         super.becomeKey()
         resetZoomTabButton.contentTintColor = .controlAccentColor
+        syncSidebarTitle()
     }
 
     override func resignKey() {
         super.resignKey()
         resetZoomTabButton.contentTintColor = .secondaryLabelColor
+        syncSidebarTitle()
         tabTitleEditor.finishEditing(commit: true)
     }
 
@@ -427,6 +425,7 @@ class TerminalWindow: NSWindow {
             // tab title if we're using custom fonts.
             tab.attributedTitle = attributedTitle
             guard title != oldValue else { return }
+            syncSidebarTitle()
 
             syncWindowTitleAppearance()
         }
@@ -437,6 +436,7 @@ class TerminalWindow: NSWindow {
         didSet {
             let font = titlebarFont ?? NSFont.titleBarFont(ofSize: NSFont.systemFontSize)
             tab.attributedTitle = attributedTitle
+            syncSidebarTitle()
 
             // We need to call this every time the font is set,
             // after entering or exiting fullscreen, or other cases,
@@ -931,5 +931,85 @@ extension TerminalWindow: TabTitleEditorDelegate {
               let focusedSurface = controller.focusedSurface
         else { return }
         makeFirstResponder(focusedSurface)
+    }
+}
+
+/// The titlebar's leading accessory: buttons that show and hide the Claude Code panel and
+/// open a new tab, sent up the responder chain to the window's controller, then optionally
+/// the window's title with the icon of the directory it represents.
+private final class SidebarTitleAccessoryView: NSView {
+    private let icon = NSImageView()
+    private let label = NSTextField(labelWithString: "")
+    private let stack = NSStackView()
+
+    init(showsTitle: Bool) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 34, height: 28))
+
+        let sidebar = Self.button("sidebar.left", help: "显示或隐藏侧边栏",
+                                  action: #selector(TerminalController.toggleClaudeSessions(_:)))
+        let newTab = Self.button("plus", help: "新建本地标签页",
+                                 action: #selector(TerminalController.newTab(_:)))
+
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 16).isActive = true
+        icon.isHidden = true
+
+        label.lineBreakMode = .byTruncatingMiddle
+        label.maximumNumberOfLines = 1
+        label.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.isHidden = !showsTitle
+
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 6
+        stack.addArrangedSubview(sidebar)
+        stack.addArrangedSubview(newTab)
+        stack.addArrangedSubview(icon)
+        stack.addArrangedSubview(label)
+        stack.setCustomSpacing(4, after: sidebar)
+        stack.setCustomSpacing(10, after: newTab)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private static func button(_ symbol: String, help: String, action: Selector) -> NSButton {
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: help)
+        let button = NSButton(image: image ?? NSImage(), target: nil, action: action)
+        button.isBordered = false
+        button.imageScaling = .scaleProportionallyUpOrDown
+        button.symbolConfiguration = .init(pointSize: 14, weight: .regular)
+        button.contentTintColor = .secondaryLabelColor
+        button.toolTip = help
+        button.widthAnchor.constraint(equalToConstant: 22).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        return button
+    }
+
+    /// Dragging the titlebar on the title still moves the window.
+    override var mouseDownCanMoveWindow: Bool { true }
+
+    func update(title: String, url: URL?, font: NSFont?, isKey: Bool) {
+        label.stringValue = title
+        label.toolTip = url?.path
+        label.font = font ?? NSFont.titleBarFont(ofSize: NSFont.systemFontSize)
+        label.textColor = isKey ? .labelColor : .secondaryLabelColor
+        if let url {
+            icon.image = NSWorkspace.shared.icon(forFile: url.path)
+            icon.isHidden = false
+        } else {
+            icon.isHidden = true
+        }
+        icon.alphaValue = isKey ? 1 : 0.6
+
+        // The accessory is as wide as its frame, so it is resized to fit the title.
+        setFrameSize(NSSize(width: stack.fittingSize.width + 8 + 8, height: frame.height))
     }
 }
