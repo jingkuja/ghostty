@@ -693,10 +693,13 @@ private struct LocalFilesPane: View {
         URL(fileURLWithPath: entry.path, isDirectory: entry.isDirectory)
     }
 
-    /// Double-clicking opens a file with its default app and browses into a directory.
+    /// Double-clicking browses into a directory, shows Markdown rendered in a new tab
+    /// and opens any other file with its default app.
     private func open(_ entry: FileEntry) {
         if entry.isDirectory {
             files.browse(entry.path)
+        } else if MarkdownTerminal.isMarkdown(entry.path) {
+            model.viewMarkdown(entry.path)
         } else {
             NSWorkspace.shared.open(url(entry))
         }
@@ -715,6 +718,9 @@ private struct LocalFilesPane: View {
             Button("进入该目录") { files.browse(entry.path) }
             Button("在新标签页中打开") { model.runInNewTab("", directory: entry.path) }
             Button("在当前标签页中 cd 到该目录") { model.insert("cd " + entry.path.shellQuoted, execute: true) }
+        } else if MarkdownTerminal.isMarkdown(entry.path) {
+            Button("在新标签页中预览") { model.viewMarkdown(entry.path) }
+            Button("用默认应用打开") { NSWorkspace.shared.open(url(entry)) }
         } else {
             Button("打开") { NSWorkspace.shared.open(url(entry)) }
         }
@@ -923,14 +929,30 @@ private struct RemoteFilesPane: View {
         }
     }
 
-    /// Double-clicking browses into a directory and opens a file with its default app,
-    /// from a temporary copy.
+    /// Double-clicking browses into a directory and, from a temporary copy, shows
+    /// Markdown rendered in a new tab and opens any other file with its default app.
     private func open(_ entry: FileEntry) {
         if entry.isDirectory {
             remote.browse(entry.path)
-        } else if let client = remote.client {
-            model.transfers.open(entry.path, client: client, host: remote.title ?? "")
+        } else if MarkdownTerminal.isMarkdown(entry.path) {
+            preview(entry)
+        } else {
+            openWithDefaultApp(entry)
         }
+    }
+
+    private func preview(_ entry: FileEntry) {
+        guard let client = remote.client else { return }
+        let host = remote.title ?? ""
+        let title = host.isEmpty ? entry.name : "\(host): \(entry.name)"
+        model.transfers.open(entry.path, client: client, host: host) { [model] local in
+            model.viewMarkdown(local.path, title: title)
+        }
+    }
+
+    private func openWithDefaultApp(_ entry: FileEntry) {
+        guard let client = remote.client else { return }
+        model.transfers.open(entry.path, client: client, host: remote.title ?? "")
     }
 
     @ViewBuilder
@@ -939,8 +961,11 @@ private struct RemoteFilesPane: View {
             Button("下载到 \(destination.abbreviatingHome)") {
                 model.transfers.download([entry.path], to: destination, client: client, host: remote.title ?? "")
             }
-            if !entry.isDirectory {
-                Button("打开（下载到临时文件夹）") { open(entry) }
+            if MarkdownTerminal.isMarkdown(entry.path) {
+                Button("在新标签页中预览") { preview(entry) }
+                Button("用默认应用打开（下载到临时文件夹）") { openWithDefaultApp(entry) }
+            } else if !entry.isDirectory {
+                Button("打开（下载到临时文件夹）") { openWithDefaultApp(entry) }
             }
             Divider()
         }

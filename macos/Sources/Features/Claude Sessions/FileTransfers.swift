@@ -438,15 +438,18 @@ final class FileTransfers: ObservableObject {
         }
     }
 
-    /// Downloads a remote file to a temporary folder and opens it with its default app.
-    func open(_ path: String, client: SFTPClient, host: String) {
+    /// Downloads a remote file to a temporary folder and opens it with its default app,
+    /// or hands the copy to `handler` when one is given.
+    func open(_ path: String, client: SFTPClient, host: String, with handler: (@MainActor (URL) -> Void)? = nil) {
         let name = (path as NSString).lastPathComponent
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("Ghostty Remote Files", isDirectory: true)
             .appendingPathComponent(host.replacingOccurrences(of: "/", with: "_"), isDirectory: true)
         let local = directory.appendingPathComponent(name)
         enqueue(Item(direction: .download, name: name, host: host, destination: "临时文件夹"),
-                completion: { NSWorkspace.shared.open(local) }) { progress in
+                completion: {
+                    if let handler { handler(local) } else { NSWorkspace.shared.open(local) }
+                }) { progress in
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try await SFTPTransfer.download(path, to: local.path, client: client, progress: progress)
         }

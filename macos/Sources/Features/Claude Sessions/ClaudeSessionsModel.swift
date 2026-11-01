@@ -207,6 +207,48 @@ final class ClaudeSessionsModel: ObservableObject {
         _ = TerminalController.newTab(controller.ghostty, from: controller.window, withBaseConfig: config)
     }
 
+    /// Shows a Markdown file rendered for the terminal in a new tab, paged with `less`.
+    /// The pager is the tab's command, so quitting it closes the tab. Falls back to the
+    /// default app for a file that is too large or not text.
+    func viewMarkdown(_ path: String, title: String? = nil) {
+        guard let controller else { return }
+        let file = URL(fileURLWithPath: path)
+        let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        var encoding = String.Encoding.utf8
+        guard size <= 4 << 20, let text = try? String(contentsOf: file, usedEncoding: &encoding) else {
+            NSWorkspace.shared.open(file)
+            return
+        }
+
+        // Laid out for the focused surface's width, which a new tab in this window shares.
+        let columns = controller.focusedSurface?.surfaceSize.map { Int($0.columns) } ?? 100
+        let name = file.lastPathComponent
+        // Named like the original, which is what less shows in its prompt.
+        let rendered = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Ghostty Markdown", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent(name)
+        do {
+            try FileManager.default.createDirectory(at: rendered.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try MarkdownTerminal.render(text, columns: columns).write(to: rendered, atomically: true, encoding: .utf8)
+        } catch {
+            NSWorkspace.shared.open(file)
+            return
+        }
+
+        var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = file.deletingLastPathComponent().path
+        // -R passes colors and hyperlinks through; -L keeps a LESSOPEN preprocessor from
+        // reformatting the .md file. The script is one `sh -c` word because on macOS the
+        // command runs as `bash -c "exec -l <command>"`, which would exec just its first part.
+        let script = "printf '\\033]2;%s\\007' \((title ?? name).shellQuoted); "
+            + "exec /usr/bin/less -R -L -- \(rendered.path.shellQuoted)"
+        config.command = "/bin/sh -c \(script.shellQuoted)"
+        config.environmentVariables["LESSCHARSET"] = "utf-8"
+        _ = TerminalController.newTab(controller.ghostty, from: controller.window, withBaseConfig: config)
+    }
+
     /// Types the command into this window's focused surface and focuses it, so the
     /// command can be completed or edited before it runs. With `execute`, Enter follows.
     func insert(_ command: String, execute: Bool) {
