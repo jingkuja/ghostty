@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// A frequently used command shown in the panel's commands tab.
+/// A frequently used CLI command shown in the panel's commands tab.
 struct ClaudeCommand: Codable, Identifiable, Equatable {
     var id = UUID()
     var name: String
@@ -91,7 +91,7 @@ struct ClaudeCommandsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 2) {
-                Text("CC 常用命令")
+                Text("CLI 命令")
                     .font(.headline)
                 Spacer()
                 Menu {

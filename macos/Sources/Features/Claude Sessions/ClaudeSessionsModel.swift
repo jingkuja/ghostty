@@ -3,8 +3,8 @@ import Combine
 
 /// The tabs of the panel on the left of a terminal window.
 enum ClaudePanelTab {
-    case sessions
     case commands
+    case sessions
 }
 
 /// State behind the Claude Code sessions panel on the left of a terminal window.
@@ -22,7 +22,7 @@ final class ClaudeSessionsModel: ObservableObject {
     private static let queue = DispatchQueue(label: "com.mitchellh.ghostty.claude-sessions", qos: .utility)
 
     @Published private(set) var isOpen = false
-    @Published var tab: ClaudePanelTab = .sessions
+    @Published var tab: ClaudePanelTab = .commands
     @Published private(set) var directory: String?
     @Published private(set) var sessions: [ClaudeSession] = []
     @Published private(set) var loading = false

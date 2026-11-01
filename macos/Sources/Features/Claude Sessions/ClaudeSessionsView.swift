@@ -10,8 +10,8 @@ struct ClaudeSessionsSidebar: View {
             HStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 2) {
+                        tabButton(.commands, systemImage: "terminal", help: "CLI 命令")
                         tabButton(.sessions, systemImage: "bubble.left.and.bubble.right", help: "CC 会话")
-                        tabButton(.commands, systemImage: "terminal", help: "CC 常用命令")
                         Spacer()
                         Button(action: model.close) {
                             Image(systemName: "xmark")
@@ -21,8 +21,8 @@ struct ClaudeSessionsSidebar: View {
                     }
 
                     switch model.tab {
-                    case .sessions: ClaudeSessionsView(model: model)
                     case .commands: ClaudeCommandsView(model: model)
+                    case .sessions: ClaudeSessionsView(model: model)
                     }
                 }
                 .padding(8)
