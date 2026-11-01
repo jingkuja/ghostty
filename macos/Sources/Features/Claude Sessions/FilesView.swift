@@ -94,15 +94,45 @@ final class RemoteFilesModel: FileTreeModel {
     /// The remote shell's directory, when the title says where it is on this host
     @Published private(set) var shellDirectory: String?
     /// Why the shell's directory isn't followed, like the shell being on another host
-    @Published private(set) var shellNotice: String?
+    @Published private(set) var shellNotice: ShellNotice?
+    /// The logins from the first to the one browsed, like web01 and then db01 ssh'd to
+    /// from web01, by title
+    @Published private(set) var hops: [String] = []
+    /// ssh logins found on the browsed host, when it isn't clear which to switch to
+    @Published private(set) var nestedChoices: [NestedSSH] = []
+    /// What switching to another login is doing, while it is
+    @Published private(set) var nestedStatus: String?
+
+    struct ShellNotice: Equatable {
+        enum Action: Equatable {
+            /// The shell is on a host ssh'd to from the browsed one
+            case switchToNested
+            /// The shell is back on the host of an earlier hop
+            case returnTo(Int)
+        }
+
+        let text: String
+        let action: Action?
+    }
+
+    /// A login in the chain from the first, and what is known about its host.
+    private struct Hop {
+        let connection: SSHConnector.Connection
+        /// The host's name as `uname -n` gives it, to tell a title from this host from one
+        /// from a host ssh'd to from here
+        let hostname: String?
+        let home: String
+        /// The directory shown when the next hop was switched to, to show it again
+        var root: String?
+    }
 
     private var target: SSHTarget?
-    private var connection: SSHConnector.Connection?
-    /// The host's name as `uname -n` gives it, to tell a title from this host from one from
-    /// a host ssh'd to from here
-    private var hostname: String?
+    private var hopStack: [Hop] = []
+    private var connection: SSHConnector.Connection? { hopStack.last?.connection }
+    private var hostname: String? { hopStack.last?.hostname }
     private var shellTitle: String?
-    /// The connection, also held by transfers using it, which closes when no one holds it
+    /// The browsed login's connection, also held by transfers using it, which closes when
+    /// no one holds it
     private(set) var client: SFTPClient?
     private var connectTask: Task<Void, Never>?
     /// Logins that failed, with why, so that focusing their surface again doesn't retry
@@ -152,14 +182,10 @@ final class RemoteFilesModel: FileTreeModel {
     func disconnect() {
         connectTask?.cancel()
         connectTask = nil
-        // Not closed: transfers still using it keep it open until they finish.
-        client = nil
-        connection = nil
         target = nil
         state = .idle
         title = nil
-        home = nil
-        resetShell()
+        clearHops()
         setRoot(nil)
     }
 
@@ -192,25 +218,23 @@ final class RemoteFilesModel: FileTreeModel {
         if let shellDirectory { setRoot(shellDirectory) }
     }
 
-    private func resetShell() {
-        followsShell = true
-        shellDirectory = nil
-        shellNotice = nil
-        hostname = nil
-    }
-
     private func applyShellTitle() {
         // Only the focused surface's login has its shell in the title.
         guard followsTerminal, state == .connected, let client, let shellTitle,
               let shell = ShellTitle.parse(shellTitle) else { return }
 
         if let hostname, !shell.isHost(hostname) {
-            setShellNotice("终端当前在 \(shell.host) 上，这里显示的是 \(hostname) 的文件")
+            if let index = hopStack.indices.dropLast().last(where: { hopStack[$0].hostname.map(shell.isHost) ?? false }) {
+                setShellNotice(.init(text: "终端已回到 \(shell.host)", action: .returnTo(index)))
+            } else {
+                setShellNotice(.init(text: "终端当前在 \(shell.host) 上，这里显示的是 \(hostname) 的文件",
+                                     action: .switchToNested))
+            }
             return
         }
         let user = connection?.user
         if let user, shell.user != user {
-            setShellNotice("终端当前用户是 \(shell.user)，这里以 \(user) 的身份访问")
+            setShellNotice(.init(text: "终端当前用户是 \(shell.user)，这里以 \(user) 的身份访问", action: nil))
         } else {
             setShellNotice(nil)
         }
@@ -225,8 +249,125 @@ final class RemoteFilesModel: FileTreeModel {
         }
     }
 
-    private func setShellNotice(_ notice: String?) {
+    private func setShellNotice(_ notice: ShellNotice?) {
         if shellNotice != notice { shellNotice = notice }
+    }
+
+    // MARK: Hosts ssh'd to from the browsed one
+
+    /// Switches to the login the browsed host runs: the one the terminal's title names,
+    /// or the only one, or else lets the user choose or type it.
+    func switchToNested() {
+        guard state == .connected, let connection, nestedStatus == nil else { return }
+        let shell = shellTitle.flatMap(ShellTitle.parse)
+        nestedChoices = []
+        nestedStatus = "正在查找 \(connection.title) 上运行的 ssh…"
+        Task {
+            let found = await SSHConnector.findNested(on: connection)
+            guard connection.client === self.client else { return }
+            self.nestedStatus = nil
+            let matching = shell.map { shell in found.filter { $0.matches(shell) } } ?? []
+            if matching.count == 1 {
+                self.switchTo(matching[0])
+            } else if found.count == 1 {
+                self.switchTo(found[0])
+            } else if found.isEmpty {
+                self.promptForNested(message: "在 \(connection.title) 上没有找到正在运行的 ssh。要切换到的主机（user@host:port）：")
+            } else {
+                self.nestedChoices = found
+            }
+        }
+    }
+
+    /// Asks for the host to switch to, logged in to from the browsed one.
+    func promptForNested(message: String? = nil) {
+        guard state == .connected, let connection, nestedStatus == nil else { return }
+        nestedChoices = []
+        guard let text = Prompt.text("切换到下一跳主机",
+                                     message: message ?? "从 \(connection.title) 登录到（user@host:port）：",
+                                     value: "", confirm: "切换") else { return }
+        Task {
+            guard let nested = await SSHConnector.nested(text, on: connection),
+                  connection.client === self.client else { return }
+            self.switchTo(nested)
+        }
+    }
+
+    func cancelNestedChoice() {
+        nestedChoices = []
+    }
+
+    /// Browses the host the login goes to, connecting through the browsed host.
+    func switchTo(_ nested: NestedSSH) {
+        guard let parent = connection else { return }
+        nestedChoices = []
+        nestedStatus = "正在切换到 \(nested.title)…需要密码时会弹出输入框"
+        Task {
+            do {
+                let next = try await SSHConnector.connect(nested, through: parent)
+                let home = try await next.client.realpath(".")
+                let hostname = await next.run("uname -n")?.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard parent.client === self.client else {
+                    next.client.close()
+                    return
+                }
+                self.nestedStatus = nil
+                self.hopStack[self.hopStack.count - 1].root = self.root
+                self.hopStack.append(Hop(connection: next, hostname: hostname?.isEmpty == false ? hostname : nil, home: home))
+                self.activateLastHop(root: nil)
+            } catch {
+                guard parent.client === self.client else { return }
+                self.nestedStatus = nil
+                let alert = NSAlert()
+                alert.messageText = "无法切换到 \(nested.title)"
+                alert.informativeText = error.localizedDescription
+                alert.runModal()
+            }
+        }
+    }
+
+    /// Goes back to an earlier login in the chain.
+    func returnTo(_ index: Int) {
+        guard hopStack.indices.contains(index), index < hopStack.count - 1 else { return }
+        // The later logins' connections close once transfers using them finish.
+        hopStack.removeSubrange((index + 1)...)
+        nestedChoices = []
+        activateLastHop(root: hopStack[index].root)
+    }
+
+    private func activateLastHop(root: String?) {
+        guard let hop = hopStack.last else { return }
+        let client = hop.connection.client
+        self.client = client
+        title = hop.connection.title
+        home = hop.home
+        hops = hopStack.map(\.connection.title)
+        followsShell = true
+        shellDirectory = nil
+        shellNotice = nil
+        state = .connected
+        client.onClose { [weak self, weak client] error in
+            Task { @MainActor in
+                guard let self, let client, self.client === client else { return }
+                self.client = nil
+                self.state = .failed(error.localizedDescription)
+            }
+        }
+        setRoot(root ?? hop.home)
+        applyShellTitle()
+    }
+
+    private func clearHops() {
+        // Not closed: transfers still using them keep them open until they finish.
+        client = nil
+        hopStack = []
+        hops = []
+        home = nil
+        followsShell = true
+        shellDirectory = nil
+        shellNotice = nil
+        nestedChoices = []
+        nestedStatus = nil
     }
 
     /// The path with the home directory shown as `~`.
@@ -244,13 +385,10 @@ final class RemoteFilesModel: FileTreeModel {
 
     private func connect(_ target: SSHTarget) {
         connectTask?.cancel()
-        client = nil
-        connection = nil
         self.target = target
         state = .connecting
         title = target.commandLine.destination
-        home = nil
-        resetShell()
+        clearHops()
         setRoot(nil)
 
         connectTask = Task { [weak self] in
@@ -262,22 +400,8 @@ final class RemoteFilesModel: FileTreeModel {
                     connection.client.close()
                     return
                 }
-                let client = connection.client
-                self.client = client
-                self.connection = connection
-                self.hostname = hostname?.isEmpty == false ? hostname : nil
-                self.title = connection.title
-                self.home = home
-                self.state = .connected
-                client.onClose { [weak self, weak client] error in
-                    Task { @MainActor in
-                        guard let self, let client, self.client === client else { return }
-                        self.client = nil
-                        self.state = .failed(error.localizedDescription)
-                    }
-                }
-                self.setRoot(home)
-                self.applyShellTitle()
+                self.hopStack = [Hop(connection: connection, hostname: hostname?.isEmpty == false ? hostname : nil, home: home)]
+                self.activateLastHop(root: nil)
             } catch {
                 guard let self, self.target == target, !Task.isCancelled else { return }
                 self.failures[target] = error.localizedDescription
@@ -652,25 +776,89 @@ private struct RemoteFilesPane: View {
             .buttonStyle(.borderless)
 
             if let title = remote.title {
-                Text(location(title))
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(remote.root.map { "\(title):\($0)" } ?? title)
+                HStack(spacing: 3) {
+                    // The earlier logins of a chain, to go back to.
+                    ForEach(Array(remote.hops.dropLast().enumerated()), id: \.offset) { index, hop in
+                        Button(hop) { remote.returnTo(index) }
+                            .buttonStyle(.link)
+                            .lineLimit(1)
+                            .help("返回 \(hop)")
+                        Text("›")
+                    }
+                    Text(location(title))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(remote.root.map { "\(title):\($0)" } ?? title)
+                }
+                .font(.caption)
+                .foregroundColor(.secondary)
             }
 
-            if remote.state == .connected, let notice = remote.shellNotice {
-                Label(notice, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundColor(.orange)
-                    .lineLimit(2)
-                    .help(notice)
+            if remote.state == .connected {
+                nestedControls
             }
 
             content
         }
         .padding(.top, 6)
+    }
+
+    /// The notice about where the shell is, and switching to a host ssh'd to from here.
+    @ViewBuilder
+    private var nestedControls: some View {
+        if let status = remote.nestedStatus {
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(status)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+            }
+        } else if !remote.nestedChoices.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("选择要切换到的主机：")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                ForEach(remote.nestedChoices) { nested in
+                    Button {
+                        remote.switchTo(nested)
+                    } label: {
+                        Text(nested.tty.map { "\(nested.title)（\($0)）" } ?? nested.title)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                    .help((["ssh"] + nested.commandLine.options + [nested.commandLine.destination]).joined(separator: " "))
+                }
+                HStack(spacing: 8) {
+                    Button("手动输入…") { remote.promptForNested() }
+                    Button("取消", action: remote.cancelNestedChoice)
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+            }
+        } else if let notice = remote.shellNotice {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Label(notice.text, systemImage: "exclamationmark.triangle")
+                    .foregroundColor(.orange)
+                    .lineLimit(2)
+                    .help(notice.text)
+                switch notice.action {
+                case .switchToNested:
+                    Button("切换", action: remote.switchToNested)
+                        .buttonStyle(.link)
+                        .help("在这里浏览终端所在的主机")
+                case .returnTo(let index):
+                    Button("返回") { remote.returnTo(index) }
+                        .buttonStyle(.link)
+                case nil:
+                    EmptyView()
+                }
+            }
+            .font(.caption)
+        }
     }
 
     private func location(_ title: String) -> String {
@@ -793,6 +981,14 @@ private struct RemoteFilesPane: View {
                         Button(host.title) { remote.browse(host) }
                     }
                 }
+            }
+            Divider()
+            Button("切换到下一跳主机…", action: remote.switchToNested)
+                .disabled(remote.state != .connected)
+            Button("手动输入下一跳主机…") { remote.promptForNested() }
+                .disabled(remote.state != .connected)
+            if remote.hops.count > 1 {
+                Button("返回 \(remote.hops[remote.hops.count - 2])") { remote.returnTo(remote.hops.count - 2) }
             }
             Divider()
             Button("重新连接", action: remote.reconnect)

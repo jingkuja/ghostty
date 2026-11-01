@@ -16,21 +16,20 @@ struct SSHTarget: Hashable, Sendable {
 /// 3. If they aren't enough, ssh asks for what it needs (a password, a key's passphrase, a
 ///    one-time code, trusting a new host key) in dialogs. Nothing is stored.
 enum SSHConnector {
-    struct Connection {
+    struct Connection: Sendable {
         let client: SFTPClient
         /// The login as `user@host`, with the port if it isn't 22
         let title: String
         /// The user logged in as
         let user: String?
-        /// The arguments to ssh, up to and including the destination, that run a command
-        /// over the connection's master without authenticating
-        fileprivate let commandArguments: [String]
-        fileprivate let environment: [String: String]
+        /// How to run ssh to the host without authenticating again
+        let invocation: SSHInvocation
+        /// The environment of the ssh processes this Mac runs for it
+        let environment: [String: String]
 
-        /// Runs a command on the host over the logged in connection and returns its output,
-        /// or nil if it failed.
+        /// Runs a shell command on the host and returns its output, or nil if it failed.
         func run(_ command: String) async -> String? {
-            let arguments = commandArguments + ["--", command]
+            let arguments = invocation.arguments(running: command)
             let environment = environment
             let result = await SSHConnector.background { SSHRunner.run(arguments, environment: environment) }
             return result.status == 0 ? result.output : nil
@@ -39,7 +38,7 @@ enum SSHConnector {
 
     /// Options for a connection that only transfers files, ahead of the user's so they
     /// win, whatever the user's config says.
-    private static let fileTransferOptions = [
+    static let fileTransferOptions = [
         "-o", "RemoteCommand=none",
         "-o", "RequestTTY=no",
         "-o", "ClearAllForwardings=yes",
@@ -67,9 +66,11 @@ enum SSHConnector {
                 client: client,
                 title: title,
                 user: config["user"],
-                commandArguments: fileTransferOptions
-                    + ["-o", "ControlMaster=no", "-o", "ControlPath=\(controlPath)", "-o", "BatchMode=yes"]
-                    + commandLine.options + [commandLine.destination],
+                invocation: .local(
+                    options: fileTransferOptions
+                        + ["-o", "ControlMaster=no", "-o", "ControlPath=\(controlPath)", "-o", "BatchMode=yes"]
+                        + commandLine.options,
+                    destination: commandLine.destination),
                 environment: environment)
         }
 
@@ -119,7 +120,7 @@ enum SSHConnector {
             .contains { message.localizedCaseInsensitiveContains($0) }
     }
 
-    private static func title(_ config: [String: String], fallback: String) -> String {
+    static func title(_ config: [String: String], fallback: String) -> String {
         guard let host = config["hostname"] else { return fallback }
         var title = config["user"].map { "\($0)@\(host)" } ?? host
         if let port = config["port"], port != "22" { title += ":\(port)" }

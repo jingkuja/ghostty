@@ -133,9 +133,13 @@ struct SSHCommandLine: Hashable, Sendable {
 
     /// Resolves the configuration ssh would use, with `ssh -G`.
     func resolve() -> [String: String] {
-        let result = SSHRunner.run(["-G"] + options + [destination])
+        Self.parseConfig(SSHRunner.run(["-G"] + options + [destination]).output)
+    }
+
+    /// The keys and values `ssh -G` printed.
+    static func parseConfig(_ output: String) -> [String: String] {
         var config: [String: String] = [:]
-        for line in result.output.split(separator: "\n") {
+        for line in output.split(separator: "\n") {
             guard let space = line.firstIndex(of: " ") else { continue }
             let key = String(line[..<space])
             // Like ssh, the first value of a repeated key is the one that counts.
