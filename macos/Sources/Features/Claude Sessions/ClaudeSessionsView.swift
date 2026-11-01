@@ -11,6 +11,8 @@ struct ClaudeSessionsSidebar: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 2) {
                         tabButton(.commands, systemImage: "terminal", help: "CLI 命令")
+                        tabButton(.files, systemImage: "folder", help: "文件")
+                        tabButton(.ssh, systemImage: "network", help: "SSH 主机")
                         tabButton(.sessions, systemImage: "bubble.left.and.bubble.right", help: "CC 会话")
                         Spacer()
                         Button(action: model.close) {
@@ -22,6 +24,8 @@ struct ClaudeSessionsSidebar: View {
 
                     switch model.tab {
                     case .commands: ClaudeCommandsView(model: model)
+                    case .files: LocalFilesView(model: model, files: model.files)
+                    case .ssh: SSHHostsView(model: model)
                     case .sessions: ClaudeSessionsView(model: model)
                     }
                 }
@@ -64,11 +68,7 @@ struct ClaudeSessionsView: View {
     }
 
     private var displayDirectory: String {
-        guard let directory = model.directory else { return "" }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        if directory == home { return "~" }
-        if directory.hasPrefix(home + "/") { return "~" + directory.dropFirst(home.count) }
-        return directory
+        model.directory?.abbreviatingHome ?? ""
     }
 
     var body: some View {

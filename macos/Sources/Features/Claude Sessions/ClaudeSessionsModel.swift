@@ -4,6 +4,8 @@ import Combine
 /// The tabs of the panel on the left of a terminal window.
 enum ClaudePanelTab {
     case commands
+    case files
+    case ssh
     case sessions
 }
 
@@ -31,6 +33,9 @@ final class ClaudeSessionsModel: ObservableObject {
     /// The session open in this window's focused surface
     @Published private(set) var activeSessionID: String?
     @Published var filter = ""
+
+    /// The files tab, following the focused surface's working directory
+    let files = LocalFilesModel()
 
     private weak var controller: TerminalController?
     private var liveSurfaces: [String: Weak<Ghostty.SurfaceView>] = [:]
@@ -81,6 +86,7 @@ final class ClaudeSessionsModel: ObservableObject {
     }
 
     private func setDirectory(_ path: String) {
+        files.terminalDirectoryDidChange(path)
         guard path != directory else { return }
         directory = path
         sessions = []
@@ -89,6 +95,7 @@ final class ClaudeSessionsModel: ObservableObject {
     /// Re-reads the sessions and which surfaces run them. Cheap when nothing changed.
     func refresh() {
         guard isOpen else { return }
+        if tab == .files { files.reload() }
         guard !refreshing else {
             refreshPending = true
             return
@@ -156,6 +163,16 @@ final class ClaudeSessionsModel: ObservableObject {
         config.initialInput = "claude --resume \(session.id)\(fork ? " --fork-session" : "")\n"
         _ = TerminalController.newTab(controller.ghostty, from: controller.window, withBaseConfig: config)
         refresh()
+    }
+
+    /// Opens a new tab in this window that types the command, if any, into its shell and runs it,
+    /// so the command is found on the shell's PATH and the shell stays open after it exits.
+    func runInNewTab(_ command: String, directory: String? = nil) {
+        guard let controller else { return }
+        var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = directory ?? self.directory
+        if !command.isEmpty { config.initialInput = command + "\n" }
+        _ = TerminalController.newTab(controller.ghostty, from: controller.window, withBaseConfig: config)
     }
 
     /// Types the command into this window's focused surface and focuses it, so the
