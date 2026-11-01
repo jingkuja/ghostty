@@ -34,8 +34,10 @@ final class ClaudeSessionsModel: ObservableObject {
     @Published private(set) var activeSessionID: String?
     @Published var filter = ""
 
-    /// The files tab, following the focused surface's working directory
+    /// The files tab's local half, following the focused surface's working directory
     let files = LocalFilesModel()
+    /// The files tab's remote half, following the host the focused surface is logged in to
+    let remote = RemoteFilesModel()
 
     private weak var controller: TerminalController?
     private var liveSurfaces: [String: Weak<Ghostty.SurfaceView>] = [:]
@@ -76,6 +78,8 @@ final class ClaudeSessionsModel: ObservableObject {
         isOpen = false
         timer?.invalidate()
         timer = nil
+        // Don't hold a connection (and the master it keeps alive) for a closed panel.
+        remote.disconnect()
     }
 
     /// The focused surface reported a new working directory.
@@ -95,7 +99,11 @@ final class ClaudeSessionsModel: ObservableObject {
     /// Re-reads the sessions and which surfaces run them. Cheap when nothing changed.
     func refresh() {
         guard isOpen else { return }
-        if tab == .files { files.reload() }
+        if tab == .files {
+            files.reload()
+            remote.update(foregroundProcessGroup: controller?.focusedSurface?.surfaceModel?.foregroundPID)
+            remote.reload()
+        }
         guard !refreshing else {
             refreshPending = true
             return

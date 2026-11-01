@@ -24,7 +24,7 @@ struct ClaudeSessionsSidebar: View {
 
                     switch model.tab {
                     case .commands: ClaudeCommandsView(model: model)
-                    case .files: LocalFilesView(model: model, files: model.files)
+                    case .files: FilesView(model: model, files: model.files, remote: model.remote)
                     case .ssh: SSHHostsView(model: model)
                     case .sessions: ClaudeSessionsView(model: model)
                     }

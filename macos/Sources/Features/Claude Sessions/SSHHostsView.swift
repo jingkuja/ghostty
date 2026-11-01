@@ -218,6 +218,10 @@ struct SSHHostsView: View {
                     Button("生成新密钥（ssh-keygen）") {
                         model.runInNewTab("ssh-keygen -t ed25519", directory: NSHomeDirectory())
                     }
+                    Divider()
+                    Button(SSHGlobalMultiplexing.isEnabled ? "移除全局连接复用…" : "为所有 ssh 登录启用连接复用…") {
+                        SSHGlobalMultiplexing.toggleWithConfirmation()
+                    }
                 } label: {
                     Image(systemName: "plus")
                 }
@@ -271,12 +275,7 @@ struct SSHHostsView: View {
     }
 
     private func connect(_ host: SSHHost, newTab: Bool) {
-        if host.multiplex {
-            // ssh can't create the connection's socket in a directory that doesn't exist.
-            let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh")
-            try? FileManager.default.createDirectory(
-                at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        }
+        if host.multiplex { SSHConnector.createSSHDirectory() }
         if newTab {
             model.runInNewTab(host.sshCommand, directory: NSHomeDirectory())
         } else {
