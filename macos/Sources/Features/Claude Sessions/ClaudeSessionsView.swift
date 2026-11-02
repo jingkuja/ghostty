@@ -5,6 +5,13 @@ import SwiftUI
 struct ClaudeSessionsSidebar: View {
     @ObservedObject var model: ClaudeSessionsModel
 
+    /// The panel's width, which dragging its trailing edge changes and new windows reuse.
+    @AppStorage("ClaudePanelWidth") private var width: Double = 260
+    /// The width when the current drag began, nil when not dragging.
+    @State private var dragStartWidth: Double?
+
+    private static let widthRange: ClosedRange<Double> = 180...900
+
     var body: some View {
         if model.isOpen {
             HStack(spacing: 0) {
@@ -30,12 +37,40 @@ struct ClaudeSessionsSidebar: View {
                     }
                 }
                 .padding(8)
-                .frame(width: 260)
+                .frame(width: width.clamped(to: Self.widthRange))
                 .frame(maxHeight: .infinity, alignment: .top)
                 .background(Color(nsColor: .windowBackgroundColor))
+                // In the panel's padding, so it sits under neither the content nor the terminal.
+                .overlay(alignment: .trailing) { resizeHandle }
                 Divider()
             }
         }
+    }
+
+    private var resizeHandle: some View {
+        Color.clear
+            .frame(width: 6)
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .backport.pointerStyle(.resizeLeftRight)
+            .onHover { isHovered in
+                // macOS 15+ uses pointerStyle above.
+                if #available(macOS 15, *) { return }
+                if isHovered {
+                    NSCursor.resizeLeftRight.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            // Global, since the handle moves with the width it changes.
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { value in
+                    let start = dragStartWidth ?? width.clamped(to: Self.widthRange)
+                    dragStartWidth = start
+                    width = (start + value.translation.width).clamped(to: Self.widthRange)
+                }
+                .onEnded { _ in dragStartWidth = nil })
+            .help("拖动调整宽度")
     }
 
     private func tabButton(_ tab: ClaudePanelTab, systemImage: String, help: String) -> some View {
