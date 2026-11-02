@@ -638,6 +638,7 @@ private struct LocalFilesPane: View {
                         .foregroundColor(files.followsTerminal ? .accentColor : nil)
                 }
                 .help(files.followsTerminal ? "正在跟随当前标签页的目录" : "回到当前标签页的目录")
+                SortOrderButton(tree: files)
                 HiddenFilesButton(tree: files)
                 Button(action: files.reload) {
                     Image(systemName: "arrow.clockwise")
@@ -771,6 +772,7 @@ private struct RemoteFilesPane: View {
                         Image(systemName: "folder.badge.plus")
                     }
                     .help("新建文件夹")
+                    SortOrderButton(tree: remote)
                     HiddenFilesButton(tree: remote)
                     Button(action: remote.reload) {
                         Image(systemName: "arrow.clockwise")
@@ -1140,6 +1142,18 @@ private struct TransferRow: View {
         let place = item.direction == .upload ? "\(item.host):\(item.destination)" : item.destination
         if case .failed(let message) = item.status { return "\(item.name) → \(place)\n\(message)" }
         return "\(item.name) → \(place)"
+    }
+}
+
+private struct SortOrderButton: View {
+    @ObservedObject var tree: FileTreeModel
+
+    var body: some View {
+        Button { tree.sortsByModified.toggle() } label: {
+            Image(systemName: "clock")
+                .foregroundColor(tree.sortsByModified ? .accentColor : nil)
+        }
+        .help(tree.sortsByModified ? "按修改时间倒序排列中，点击改回按名称排列" : "按修改时间倒序排列")
     }
 }
 

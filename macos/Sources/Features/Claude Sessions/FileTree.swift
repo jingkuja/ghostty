@@ -23,6 +23,22 @@ struct FileEntry: Identifiable, Equatable, Sendable {
         }
     }
 
+    /// The most recently modified first, directories mixed in with files as Finder does
+    /// when sorting by date. Entries without a date go last; the sort is stable, so
+    /// entries `sorted` by name stay in that order among equal dates.
+    static func newestFirst(_ entries: [FileEntry]) -> [FileEntry] {
+        let indexed = entries.enumerated().map { ($0.offset, $0.element) }
+        return indexed.sorted { a, b in
+            let (ia, ea) = a, (ib, eb) = b
+            switch (ea.modified, eb.modified) {
+            case let (ma?, mb?) where ma != mb: return ma > mb
+            case (.some, nil): return true
+            case (nil, .some): return false
+            default: return ia < ib
+            }
+        }.map(\.1)
+    }
+
     static func join(_ directory: String, _ name: String) -> String {
         directory.hasSuffix("/") ? directory + name : directory + "/" + name
     }
@@ -35,6 +51,8 @@ class FileTreeModel: ObservableObject {
     @Published private(set) var root: String?
     /// Listings include hidden files; this only decides whether rows show them.
     @Published var showHidden = false
+    /// Listings are kept sorted by name; this only decides the order rows show them in.
+    @Published var sortsByModified = false
     @Published private(set) var expanded: Set<String> = []
     /// The listing of every loaded directory, by path
     @Published private(set) var listings: [String: [FileEntry]] = [:]
@@ -84,7 +102,9 @@ class FileTreeModel: ObservableObject {
         guard let root else { return [] }
         var rows: [(FileEntry, Int)] = []
         func append(_ directory: String, depth: Int) {
-            for entry in listings[directory] ?? [] where showHidden || !entry.isHidden {
+            let listing = listings[directory] ?? []
+            for entry in sortsByModified ? FileEntry.newestFirst(listing) : listing
+            where showHidden || !entry.isHidden {
                 rows.append((entry, depth))
                 if entry.isDirectory, expanded.contains(entry.path) {
                     append(entry.path, depth: depth + 1)
