@@ -626,7 +626,7 @@ private struct LocalFilesPane: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 2) {
                 Text("本机文件")
-                    .font(.headline)
+                    .font(.system(size: 13, weight: .semibold))
                 Spacer()
                 Button(action: files.browseParent) {
                     Image(systemName: "arrow.up")
@@ -744,7 +744,7 @@ private struct RemoteFilesPane: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 2) {
                 Text("远程主机")
-                    .font(.headline)
+                    .font(.system(size: 13, weight: .semibold))
                 Spacer()
                 if remote.state == .connected {
                     Button(action: remote.browseParent) {

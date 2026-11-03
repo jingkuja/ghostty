@@ -12,48 +12,73 @@ struct ClaudeSessionsSidebar: View {
 
     private static let widthRange: ClosedRange<Double> = 180...900
 
+    @Namespace private var tabNamespace
+    /// Whether the pointer is over the resize handle or dragging it, which shows its grip.
+    @State private var handleHovered = false
+
     var body: some View {
         if model.isOpen {
-            HStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 2) {
-                        tabButton(.ssh, systemImage: "network", help: "SSH 主机")
-                        tabButton(.commands, systemImage: "terminal", help: "CLI 命令")
-                        tabButton(.files, systemImage: "folder", help: "文件")
-                        tabButton(.sessions, systemImage: "bubble.left.and.bubble.right", help: "CC 会话")
-                        Spacer()
-                        Button(action: model.toggle) {
-                            Image(systemName: "sidebar.left")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("隐藏侧边栏")
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 6) {
+                    tabBar
+                    Button(action: model.toggle) {
+                        Image(systemName: "sidebar.left")
+                            .font(.system(size: 13))
+                            .foregroundColor(.secondary)
+                            .frame(width: 26, height: 26)
+                            .contentShape(Rectangle())
                     }
-
-                    switch model.tab {
-                    case .commands: ClaudeCommandsView(model: model)
-                    case .files: FilesView(model: model, files: model.files, remote: model.remote, transfers: model.transfers)
-                    case .ssh: SSHHostsView(model: model)
-                    case .sessions: ClaudeSessionsView(model: model)
-                    }
+                    .buttonStyle(.plain)
+                    .help("隐藏侧边栏")
                 }
-                .padding(8)
-                .frame(width: width.clamped(to: Self.widthRange))
-                .frame(maxHeight: .infinity, alignment: .top)
-                .background(Color(nsColor: .windowBackgroundColor))
-                // In the panel's padding, so it sits under neither the content nor the terminal.
-                .overlay(alignment: .trailing) { resizeHandle }
-                Divider()
+
+                switch model.tab {
+                case .commands: ClaudeCommandsView(model: model)
+                case .files: FilesView(model: model, files: model.files, remote: model.remote, transfers: model.transfers)
+                case .ssh: SSHHostsView(model: model)
+                case .sessions: ClaudeSessionsView(model: model)
+                }
             }
+            .padding(10)
+            .frame(width: width.clamped(to: Self.widthRange))
+            .frame(maxHeight: .infinity, alignment: .top)
+            .background(PanelStyle.cardShape.fill(PanelStyle.cardFill))
+            .overlay(PanelStyle.cardShape.strokeBorder(PanelStyle.hairline, lineWidth: 1))
+            // In the gutter, so it sits under neither the panel nor the terminal.
+            .overlay(alignment: .trailing) { resizeHandle.offset(x: PanelStyle.gutter) }
+            .padding(.trailing, PanelStyle.gutter)
         }
     }
 
+    /// The tabs as a segmented control whose selection slides between them.
+    private var tabBar: some View {
+        HStack(spacing: 2) {
+            tabButton(.ssh, systemImage: "network", help: "SSH 主机")
+            tabButton(.commands, systemImage: "terminal", help: "CLI 命令")
+            tabButton(.files, systemImage: "folder", help: "文件")
+            tabButton(.sessions, systemImage: "bubble.left.and.bubble.right", help: "CC 会话")
+        }
+        .padding(2)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(PanelStyle.fieldFill))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(PanelStyle.hairline, lineWidth: 1))
+        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: model.tab)
+    }
+
     private var resizeHandle: some View {
-        Color.clear
-            .frame(width: 6)
+        Capsule()
+            .fill(Color.primary.opacity(handleHovered || dragStartWidth != nil ? 0.35 : 0))
+            .frame(width: 3, height: 36)
+            .frame(width: PanelStyle.gutter)
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
+            .animation(.easeOut(duration: 0.15), value: handleHovered)
             .backport.pointerStyle(.resizeLeftRight)
             .onHover { isHovered in
+                handleHovered = isHovered
                 // macOS 15+ uses pointerStyle above.
                 if #available(macOS 15, *) { return }
                 if isHovered {
@@ -74,13 +99,21 @@ struct ClaudeSessionsSidebar: View {
     }
 
     private func tabButton(_ tab: ClaudePanelTab, systemImage: String, help: String) -> some View {
-        Button { model.tab = tab } label: {
+        let selected = model.tab == tab
+        return Button { model.tab = tab } label: {
             Image(systemName: systemImage)
-                .foregroundColor(model.tab == tab ? .accentColor : .secondary)
-                .frame(width: 26, height: 22)
-                .background(
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(model.tab == tab ? Color.accentColor.opacity(0.18) : Color.clear))
+                .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                .foregroundColor(selected ? .accentColor : .secondary)
+                .frame(maxWidth: .infinity)
+                .frame(height: 22)
+                .background {
+                    if selected {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.primary.opacity(0.11))
+                            .shadow(color: .black.opacity(0.25), radius: 1, y: 0.5)
+                            .matchedGeometryEffect(id: "selection", in: tabNamespace)
+                    }
+                }
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -107,28 +140,15 @@ struct ClaudeSessionsView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 2) {
-                Text("CC 会话")
-                    .font(.headline)
-                Spacer()
+        VStack(alignment: .leading, spacing: 8) {
+            PanelHeader(title: "CC 会话", subtitle: displayDirectory, subtitleHelp: model.directory) {
                 Button(action: model.refresh) {
                     Image(systemName: "arrow.clockwise")
                 }
                 .help("刷新")
             }
-            .buttonStyle(.borderless)
 
-            Text(displayDirectory)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .help(model.directory ?? "")
-
-            TextField("筛选", text: $model.filter)
-                .textFieldStyle(.roundedBorder)
-                .controlSize(.small)
+            PanelSearchField(text: $model.filter)
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 1) {
@@ -211,11 +231,9 @@ private struct ClaudeSessionRow: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 3)
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(isActive ? Color.accentColor.opacity(0.25) : hovered ? Color.primary.opacity(0.08) : Color.clear))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 5)
+            .background(PanelRowBackground(selected: isActive, hovered: hovered))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

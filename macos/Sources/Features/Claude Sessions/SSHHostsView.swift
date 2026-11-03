@@ -207,11 +207,8 @@ struct SSHHostsView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 2) {
-                Text("SSH 主机")
-                    .font(.headline)
-                Spacer()
+        VStack(alignment: .leading, spacing: 8) {
+            PanelHeader(title: "SSH 主机", subtitle: "点击在新标签页连接，右键可配置公钥") {
                 Menu {
                     Button("添加主机…") { editing = SSHHost() }
                     Divider()
@@ -231,17 +228,10 @@ struct SSHHostsView: View {
                 .help("添加主机")
             }
 
-            Text("点击在新标签页连接，右键可配置公钥")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-
-            TextField("筛选", text: $filter)
-                .textFieldStyle(.roundedBorder)
-                .controlSize(.small)
+            PanelSearchField(text: $filter)
 
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 1) {
+                LazyVStack(alignment: .leading, spacing: 2) {
                     if store.hosts.isEmpty {
                         Text("还没有 SSH 主机，点击 + 添加")
                             .font(.caption)
@@ -328,25 +318,29 @@ private struct SSHHostRow: View {
 
     var body: some View {
         Button { connect(true) } label: {
-            HStack(spacing: 4) {
-                VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 8) {
+                PanelIconTile(symbol: "server.rack", colors: Self.tileColors, size: 26)
+                VStack(alignment: .leading, spacing: 2) {
                     Text(host.title)
+                        .font(.system(size: 13, weight: .medium))
                         .lineLimit(1)
                         .truncationMode(.tail)
                     Text(subtitle)
-                        .font(.system(.caption, design: .monospaced))
+                        .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
                 Spacer(minLength: 4)
                 testIndicator
+                Image(systemName: "arrow.up.forward")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.secondary)
+                    .opacity(hovered ? 1 : 0)
             }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 3)
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(hovered ? Color.primary.opacity(0.08) : Color.clear))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 6)
+            .background(PanelRowBackground(hovered: hovered))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -370,6 +364,8 @@ private struct SSHHostRow: View {
             Button("删除", action: remove)
         }
     }
+
+    private static let tileColors = [Color(red: 0.36, green: 0.55, blue: 0.98), Color(red: 0.24, green: 0.36, blue: 0.86)]
 
     private var subtitle: String {
         var text = host.destination

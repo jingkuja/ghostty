@@ -191,11 +191,8 @@ struct ClaudeCommandsView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 2) {
-                Text("CLI 命令")
-                    .font(.headline)
-                Spacer()
+        VStack(alignment: .leading, spacing: 8) {
+            PanelHeader(title: "CLI 命令", subtitle: "点击输入到当前标签页，右键可执行或复制") {
                 Menu {
                     ForEach(CommandGroup.allCases) { group in
                         Button("添加到 \(group.title)…") { add(to: group) }
@@ -211,14 +208,7 @@ struct ClaudeCommandsView: View {
                 .help("添加命令")
             }
 
-            Text("点击输入到当前标签页，右键可执行或复制")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-
-            TextField("筛选", text: $filter)
-                .textFieldStyle(.roundedBorder)
-                .controlSize(.small)
+            PanelSearchField(text: $filter)
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
@@ -300,9 +290,7 @@ private struct CommandGroupRow: View {
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(hovered ? Color.primary.opacity(0.08) : Color.clear))
+            .background(PanelRowBackground(hovered: hovered))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -348,11 +336,12 @@ private struct ClaudeCommandRow: View {
             HStack(spacing: 4) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(command.name.isEmpty ? command.command : command.name)
+                        .font(.system(size: 13))
                         .lineLimit(1)
                         .truncationMode(.tail)
                     if !command.name.isEmpty {
                         Text(command.command)
-                            .font(.system(.caption, design: .monospaced))
+                            .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
@@ -367,11 +356,9 @@ private struct ClaudeCommandRow: View {
                     .help("复制")
                 }
             }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 3)
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(hovered ? Color.primary.opacity(0.08) : Color.clear))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(PanelRowBackground(hovered: hovered))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
