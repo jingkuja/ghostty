@@ -233,6 +233,25 @@ class TerminalWindow: NSWindow {
         super.becomeKey()
         resetZoomTabButton.contentTintColor = .controlAccentColor
         syncSidebarTitle()
+        // After AppKit is done with the tab group, e.g. when a tab closes or is dragged out.
+        DispatchQueue.main.async { [weak self] in self?.syncTabBarVisibility() }
+    }
+
+    /// Shows the tab bar while the window has a single tab too, unless that is turned off in
+    /// the settings popover. The styles with tabs in the titlebar manage their own.
+    func syncTabBarVisibility() {
+        guard leadsWithTitle, tabbingMode != .disallowed, isVisible,
+              !styleMask.contains(.fullScreen),
+              let tabGroup, tabGroup.windows.count == 1 else { return }
+        if tabGroup.isTabBarVisible != QuickSettingsStore.alwaysShowsTabBar {
+            toggleTabBar(nil)
+        }
+    }
+
+    static func syncAllTabBars() {
+        for case let window as TerminalWindow in NSApp.windows {
+            window.syncTabBarVisibility()
+        }
     }
 
     override func resignKey() {
@@ -947,8 +966,9 @@ private final class SidebarTitleAccessoryView: NSView {
 
         let sidebar = Self.button("sidebar.left", help: "显示或隐藏侧边栏",
                                   action: #selector(TerminalController.toggleClaudeSessions(_:)))
-        let newTab = Self.button("plus", help: "新建本地标签页",
-                                 action: #selector(TerminalController.newTab(_:)))
+        let settings = Self.button("gearshape", help: "设置（外观、字体、颜色…）",
+                                   action: #selector(showSettings(_:)))
+        settings.target = self
 
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.widthAnchor.constraint(equalToConstant: 16).isActive = true
@@ -965,11 +985,11 @@ private final class SidebarTitleAccessoryView: NSView {
         stack.alignment = .centerY
         stack.spacing = 6
         stack.addArrangedSubview(sidebar)
-        stack.addArrangedSubview(newTab)
+        stack.addArrangedSubview(settings)
         stack.addArrangedSubview(icon)
         stack.addArrangedSubview(label)
         stack.setCustomSpacing(4, after: sidebar)
-        stack.setCustomSpacing(10, after: newTab)
+        stack.setCustomSpacing(10, after: settings)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -995,6 +1015,22 @@ private final class SidebarTitleAccessoryView: NSView {
 
     /// Dragging the titlebar on the title still moves the window.
     override var mouseDownCanMoveWindow: Bool { true }
+
+    private var settingsPopover: NSPopover?
+
+    @objc private func showSettings(_ sender: NSButton) {
+        if let settingsPopover, settingsPopover.isShown {
+            settingsPopover.performClose(sender)
+            return
+        }
+        let popover = NSPopover()
+        // Not transient, so picking a color in the color panel doesn't close it.
+        popover.behavior = .semitransient
+        popover.animates = true
+        popover.contentViewController = NSHostingController(rootView: QuickSettingsView())
+        popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)
+        settingsPopover = popover
+    }
 
     func update(title: String, url: URL?, font: NSFont?, isKey: Bool) {
         label.stringValue = title
