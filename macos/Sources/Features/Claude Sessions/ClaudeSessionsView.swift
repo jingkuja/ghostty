@@ -6,30 +6,29 @@ struct ClaudeSessionsSidebar: View {
     @ObservedObject var model: ClaudeSessionsModel
 
     /// The panel's width, which dragging its trailing edge changes and new windows reuse.
-    @AppStorage("ClaudePanelWidth") private var width: Double = 260
+    @AppStorage(Self.widthKey) private var width: Double = Self.defaultWidth
     /// The width when the current drag began, nil when not dragging.
     @State private var dragStartWidth: Double?
 
-    private static let widthRange: ClosedRange<Double> = 180...900
+    static let widthKey = "ClaudePanelWidth"
+    static let defaultWidth: Double = 260
+    static let widthRange: ClosedRange<Double> = 180...900
 
-    @Namespace private var tabNamespace
+    /// The panel's width as stored, for AppKit to lay out the tab bar beside it.
+    static var storedWidth: CGFloat {
+        let width = UserDefaults.standard.object(forKey: widthKey) as? Double ?? defaultWidth
+        return width.clamped(to: widthRange)
+    }
+
     /// Whether the pointer is over the resize handle or dragging it, which shows its grip.
     @State private var handleHovered = false
 
     var body: some View {
         if model.isOpen {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 6) {
-                    tabBar
-                    Button(action: model.toggle) {
-                        Image(systemName: "sidebar.left")
-                            .font(.system(size: 13))
-                            .foregroundColor(.secondary)
-                            .frame(width: 26, height: 26)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("隐藏侧边栏")
+                // Drawn in the window's tab bar instead while the window shows one.
+                if !model.tabsInTitlebar {
+                    ClaudePanelTabs(model: model)
                 }
 
                 switch model.tab {
@@ -48,24 +47,6 @@ struct ClaudeSessionsSidebar: View {
             .overlay(alignment: .trailing) { resizeHandle.offset(x: PanelStyle.gutter) }
             .padding(.trailing, PanelStyle.gutter)
         }
-    }
-
-    /// The tabs as a segmented control whose selection slides between them.
-    private var tabBar: some View {
-        HStack(spacing: 2) {
-            tabButton(.ssh, systemImage: "network", help: "SSH 主机")
-            tabButton(.commands, systemImage: "terminal", help: "CLI 命令")
-            tabButton(.files, systemImage: "folder", help: "文件")
-            tabButton(.sessions, systemImage: "bubble.left.and.bubble.right", help: "CC 会话")
-        }
-        .padding(2)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(PanelStyle.fieldFill))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(PanelStyle.hairline, lineWidth: 1))
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: model.tab)
     }
 
     private var resizeHandle: some View {
@@ -97,6 +78,38 @@ struct ClaudeSessionsSidebar: View {
                 .onEnded { _ in dragStartWidth = nil })
             .help("拖动调整宽度")
     }
+}
+
+/// The panel's tabs as a segmented control whose selection slides between them, and a
+/// button that hides the panel. They lead the window's tab bar when there is one.
+struct ClaudePanelTabs: View {
+    @ObservedObject var model: ClaudeSessionsModel
+
+    @Namespace private var tabNamespace
+
+    var body: some View {
+        HStack(spacing: 6) {
+            tabBar
+            ClaudePanelToggle(model: model)
+        }
+    }
+
+    private var tabBar: some View {
+        HStack(spacing: 2) {
+            tabButton(.ssh, systemImage: "network", help: "SSH 主机")
+            tabButton(.commands, systemImage: "terminal", help: "CLI 命令")
+            tabButton(.files, systemImage: "folder", help: "文件")
+            tabButton(.sessions, systemImage: "bubble.left.and.bubble.right", help: "CC 会话")
+        }
+        .padding(2)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(PanelStyle.fieldFill))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(PanelStyle.hairline, lineWidth: 1))
+        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: model.tab)
+    }
 
     private func tabButton(_ tab: ClaudePanelTab, systemImage: String, help: String) -> some View {
         let selected = model.tab == tab
@@ -118,6 +131,55 @@ struct ClaudeSessionsSidebar: View {
         }
         .buttonStyle(.plain)
         .help(help)
+    }
+}
+
+/// Shows or hides the panel.
+struct ClaudePanelToggle: View {
+    @ObservedObject var model: ClaudeSessionsModel
+
+    static let size: CGFloat = 26
+
+    var body: some View {
+        Button(action: model.toggle) {
+            Image(systemName: "sidebar.left")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+                .frame(width: Self.size, height: Self.size)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(model.isOpen ? "隐藏侧边栏" : "显示侧边栏")
+    }
+}
+
+/// The leading end of the window's tab bar: while the panel is open its tabs, as wide as
+/// the panel under them so the panel reaches up to the row of the window's tabs, and
+/// while it is closed the button that shows it.
+struct ClaudePanelTitlebarTabs: View {
+    @ObservedObject var model: ClaudeSessionsModel
+    /// Lets the window move its tabs as the panel is resized.
+    let widthDidChange: () -> Void
+
+    @AppStorage(ClaudeSessionsSidebar.widthKey) private var width = ClaudeSessionsSidebar.defaultWidth
+
+    /// How much of the tab bar's row this takes, for AppKit to lay the tabs out after it.
+    static func width(open: Bool) -> CGFloat {
+        PanelStyle.gutter + (open ? ClaudeSessionsSidebar.storedWidth : ClaudePanelToggle.size)
+    }
+
+    var body: some View {
+        Group {
+            if model.isOpen {
+                ClaudePanelTabs(model: model)
+                    .frame(width: width.clamped(to: ClaudeSessionsSidebar.widthRange))
+            } else {
+                ClaudePanelToggle(model: model)
+            }
+        }
+        .padding(.leading, PanelStyle.gutter)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .onChange(of: width) { _ in widthDidChange() }
     }
 }
 

@@ -25,6 +25,8 @@ final class ClaudeSessionsModel: ObservableObject {
 
     @Published private(set) var isOpen = false
     @Published var tab: ClaudePanelTab = .ssh
+    /// Whether the panel's tabs are drawn in the window's tab bar rather than atop the panel
+    @Published var tabsInTitlebar = false
     @Published private(set) var directory: String?
     @Published private(set) var sessions: [ClaudeSession] = []
     @Published private(set) var loading = false

@@ -29,6 +29,9 @@ class TerminalWindow: NSWindow {
     private let sidebarAccessory = NSTitlebarAccessoryViewController()
     /// The sidebar button, followed by the title when it is drawn at the leading edge
     private var sidebarTitleView: SidebarTitleAccessoryView?
+    /// The settings button at the titlebar's trailing edge, for the styles that keep
+    /// AppKit's titlebar; the others show it at the leading edge, out of the tabs' way.
+    private let settingsAccessory = NSTitlebarAccessoryViewController()
 
     /// Styles that move tabs into the titlebar show titles there, so they keep AppKit's.
     private var leadsWithTitle: Bool {
@@ -146,7 +149,7 @@ class TerminalWindow: NSWindow {
         if styleMask.contains(.titled) {
             // The title follows the sidebar button at the leading edge, where it reads
             // better than centered; AppKit's own, with its proxy icon, is hidden for it.
-            let accessory = SidebarTitleAccessoryView(showsTitle: leadsWithTitle)
+            let accessory = SidebarTitleAccessoryView(showsTitle: leadsWithTitle, showsSettings: !leadsWithTitle)
             sidebarTitleView = accessory
             if leadsWithTitle {
                 titleVisibility = .hidden
@@ -155,6 +158,12 @@ class TerminalWindow: NSWindow {
             sidebarAccessory.layoutAttribute = .leading
             sidebarAccessory.view = accessory
             addTitlebarAccessoryViewController(sidebarAccessory)
+
+            if leadsWithTitle {
+                settingsAccessory.layoutAttribute = .right
+                settingsAccessory.view = SettingsAccessoryView()
+                addTitlebarAccessoryViewController(settingsAccessory)
+            }
 
             resetZoomAccessory.layoutAttribute = .right
             resetZoomAccessory.view = NSHostingView(rootView: ResetZoomAccessoryView(
@@ -272,6 +281,7 @@ class TerminalWindow: NSWindow {
             tabBarDidDisappear()
         }
         viewModel.isMainWindow = true
+        syncPanelTabs()
     }
 
     override func resignMain() {
@@ -362,15 +372,125 @@ class TerminalWindow: NSWindow {
             removeTitlebarAccessoryViewController(at: idx)
         }
 
+        // AppKit may add the tab bar itself a moment after its accessory.
+        DispatchQueue.main.async { [weak self] in self?.syncPanelTabs() }
+
         // We don't need to do this with the update accessory. I don't know why but
         // everything works fine.
     }
 
     private func tabBarDidDisappear() {
+        DispatchQueue.main.async { [weak self] in self?.syncPanelTabs() }
+
         if styleMask.contains(.titled) {
             if titlebarAccessoryViewControllers.firstIndex(of: resetZoomAccessory) == nil {
                 addTitlebarAccessoryViewController(resetZoomAccessory)
             }
+        }
+    }
+
+    // MARK: Claude Code Panel Tabs
+
+    /// The Claude Code panel of this window, whose tabs lead the tab bar while it is open
+    private weak var claudeSessions: ClaudeSessionsModel?
+    private var claudeSessionsCancellables = Set<AnyCancellable>()
+    /// The panel's tabs, drawn beside the tab bar in the titlebar
+    private var panelTabsView: NSView?
+    /// The tab bar whose frame is watched, since AppKit lays it out again on its own
+    private weak var watchedTabBar: NSView?
+    private var tabBarFrameObserver: NSObjectProtocol? {
+        didSet {
+            guard let oldValue else { return }
+            NotificationCenter.default.removeObserver(oldValue)
+        }
+    }
+
+    func attachClaudeSessions(_ model: ClaudeSessionsModel) {
+        claudeSessions = model
+        claudeSessionsCancellables = []
+        model.$isOpen
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                // The new value is only visible on the model once the sink returns.
+                DispatchQueue.main.async { self?.syncPanelTabs() }
+            }
+            .store(in: &claudeSessionsCancellables)
+
+        // In fullscreen the tab bar moves to a window of its own, and back after.
+        let center = NotificationCenter.default
+        center.publisher(for: NSWindow.didEnterFullScreenNotification, object: self)
+            .merge(with: center.publisher(for: NSWindow.didExitFullScreenNotification, object: self))
+            .sink { [weak self] _ in self?.syncPanelTabs() }
+            .store(in: &claudeSessionsCancellables)
+    }
+
+    /// While the panel is open, moves the tab bar's leading edge over to the terminal beside
+    /// the panel and draws the panel's tabs in the space it leaves, so the panel reaches up
+    /// to the row of the window's tabs. Idempotent: AppKit rebuilds and relayouts the tab bar
+    /// in many situations, so this is called again whenever it may have.
+    func syncPanelTabs() {
+        // The styles that move the tabs into the titlebar lay them out themselves.
+        guard leadsWithTitle else { return }
+        guard let tabBar = tabBarView, let host = tabBar.superview else {
+            panelTabsView?.removeFromSuperview()
+            setTabsInTitlebar(false)
+            return
+        }
+
+        // Decided apart from whether the panel is open so it opens without them atop it.
+        setTabsInTitlebar(true)
+        let shows = claudeSessions != nil
+        let headerWidth = ClaudePanelTitlebarTabs.width(open: claudeSessions?.isOpen == true)
+
+        // Left of the tabs themselves the tab bar has a margin of its own. While the panel
+        // is open this puts them over the terminal beside it.
+        let margin = tabBar.firstDescendant(withClassName: "NSTabBarTrackView")?.frame.minX ?? 8
+        let inset = shows ? max(0, headerWidth + PanelStyle.gutter - margin) : 0
+        let frame = NSRect(x: inset, y: tabBar.frame.minY,
+                           width: max(0, host.bounds.width - inset), height: tabBar.frame.height)
+        if tabBar.frame != frame {
+            tabBar.autoresizingMask = [.width]
+            tabBar.frame = frame
+        }
+
+        if shows, let claudeSessions {
+            let view = panelTabsView ?? {
+                let view = NonDraggableHostingView(rootView: ClaudePanelTitlebarTabs(
+                    model: claudeSessions,
+                    widthDidChange: { [weak self] in self?.syncPanelTabs() }))
+                view.sizingOptions = []
+                panelTabsView = view
+                return view
+            }()
+            if view.superview !== host { host.addSubview(view) }
+            view.autoresizingMask = [.maxXMargin]
+            view.frame = NSRect(x: 0, y: frame.minY, width: headerWidth, height: frame.height)
+        } else {
+            panelTabsView?.removeFromSuperview()
+        }
+
+        watchTabBarFrame(tabBar)
+    }
+
+    private func setTabsInTitlebar(_ value: Bool) {
+        // The tab bar's row has its own button for the panel then.
+        sidebarTitleView?.showsSidebarButton = !value
+        guard let claudeSessions, claudeSessions.tabsInTitlebar != value else { return }
+        claudeSessions.tabsInTitlebar = value
+    }
+
+    /// AppKit lays the tab bar out again when tabs come and go or its appearance changes,
+    /// which would put it back under the panel's tabs.
+    private func watchTabBarFrame(_ tabBar: NSView) {
+        guard watchedTabBar !== tabBar || tabBarFrameObserver == nil else { return }
+        watchedTabBar = tabBar
+        tabBar.postsFrameChangedNotifications = true
+        tabBarFrameObserver = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: tabBar,
+            queue: .main
+        ) { [weak self] _ in
+            DispatchQueue.main.async { self?.syncPanelTabs() }
         }
     }
 
@@ -685,6 +805,7 @@ class TerminalWindow: NSWindow {
         if let observer = tabMenuObserver {
             NotificationCenter.default.removeObserver(observer)
         }
+        tabBarFrameObserver = nil
     }
 
     // MARK: Config
@@ -960,15 +1081,24 @@ private final class SidebarTitleAccessoryView: NSView {
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
     private let stack = NSStackView()
+    private let sidebar: NSButton
 
-    init(showsTitle: Bool) {
+    /// Hidden while the tab bar's row has its own button for the panel.
+    var showsSidebarButton = true {
+        didSet {
+            guard showsSidebarButton != oldValue else { return }
+            sidebar.isHidden = !showsSidebarButton
+            fitWidth()
+        }
+    }
+
+    init(showsTitle: Bool, showsSettings: Bool) {
+        sidebar = Self.button("sidebar.left", help: "显示或隐藏侧边栏",
+                                  action: #selector(TerminalController.toggleClaudeSessions(_:)))
         super.init(frame: NSRect(x: 0, y: 0, width: 34, height: 28))
 
-        let sidebar = Self.button("sidebar.left", help: "显示或隐藏侧边栏",
-                                  action: #selector(TerminalController.toggleClaudeSessions(_:)))
-        let settings = Self.button("gearshape", help: "设置（外观、字体、颜色…）",
-                                   action: #selector(showSettings(_:)))
-        settings.target = self
+        let settings = SettingsButton()
+        settings.isHidden = !showsSettings
 
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.widthAnchor.constraint(equalToConstant: 16).isActive = true
@@ -1016,22 +1146,6 @@ private final class SidebarTitleAccessoryView: NSView {
     /// Dragging the titlebar on the title still moves the window.
     override var mouseDownCanMoveWindow: Bool { true }
 
-    private var settingsPopover: NSPopover?
-
-    @objc private func showSettings(_ sender: NSButton) {
-        if let settingsPopover, settingsPopover.isShown {
-            settingsPopover.performClose(sender)
-            return
-        }
-        let popover = NSPopover()
-        // Not transient, so picking a color in the color panel doesn't close it.
-        popover.behavior = .semitransient
-        popover.animates = true
-        popover.contentViewController = NSHostingController(rootView: QuickSettingsView())
-        popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)
-        settingsPopover = popover
-    }
-
     func update(title: String, url: URL?, font: NSFont?, isKey: Bool) {
         label.stringValue = title
         label.toolTip = url?.path
@@ -1045,7 +1159,70 @@ private final class SidebarTitleAccessoryView: NSView {
         }
         icon.alphaValue = isKey ? 1 : 0.6
 
-        // The accessory is as wide as its frame, so it is resized to fit the title.
+        fitWidth()
+    }
+
+    /// The accessory is as wide as its frame, so it is resized to fit what it shows.
+    private func fitWidth() {
         setFrameSize(NSSize(width: stack.fittingSize.width + 8 + 8, height: frame.height))
     }
+}
+
+/// Opens a popover with the common settings.
+private final class SettingsButton: NSButton {
+    private var settingsPopover: NSPopover?
+
+    convenience init() {
+        let help = "设置（外观、字体、颜色…）"
+        self.init(image: NSImage(systemSymbolName: "gearshape", accessibilityDescription: help) ?? NSImage(),
+                  target: nil, action: nil)
+        isBordered = false
+        imageScaling = .scaleProportionallyUpOrDown
+        // Small and light, so it doesn't compete with the tab bar's new tab button under it.
+        symbolConfiguration = .init(pointSize: 12, weight: .light)
+        contentTintColor = .tertiaryLabelColor
+        toolTip = help
+        widthAnchor.constraint(equalToConstant: 16).isActive = true
+        heightAnchor.constraint(equalToConstant: 16).isActive = true
+        target = self
+        action = #selector(showSettings(_:))
+    }
+
+    @objc private func showSettings(_ sender: NSButton) {
+        if let settingsPopover, settingsPopover.isShown {
+            settingsPopover.performClose(sender)
+            return
+        }
+        let popover = NSPopover()
+        // Not transient, so picking a color in the color panel doesn't close it.
+        popover.behavior = .semitransient
+        popover.animates = true
+        let controller = NSHostingController(rootView: QuickSettingsView())
+        // Sized before it is shown, or AppKit places it for an empty view and it then
+        // grows past the screen's edge.
+        controller.sizingOptions = [.preferredContentSize]
+        popover.contentViewController = controller
+        popover.contentSize = controller.view.fittingSize
+        popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)
+        settingsPopover = popover
+    }
+}
+
+/// The titlebar's trailing accessory, with the settings button.
+private final class SettingsAccessoryView: NSView {
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: 16 + 14 + 6, height: 28))
+        let button = SettingsButton()
+        button.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(button)
+        NSLayoutConstraint.activate([
+            // Centered over the tab bar's new tab button.
+            button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            button.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var mouseDownCanMoveWindow: Bool { true }
 }
